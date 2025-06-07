@@ -32,7 +32,8 @@ const char* password = "2WC456403581";   // Cambia por tu contraseña
 
 // Configuración de pines
 const int BOTON_PIN = 2;        // Botón físico
-const int RELE_CANAL1 = 7;      // Canal 1 - Foco principal
+const int RELE_CANAL1 = 7;      // Canal 1 - Foco 1
+const int LED_CANAL1 = 3;      // Canal 1 - Led 1
 const int RELE_CANAL2 = 8;      // Canal 2 - Disponible
 const int RELE_CANAL3 = 9;      // Canal 3 - Disponible  
 const int RELE_CANAL4 = 10;     // Canal 4 - Disponible
@@ -43,6 +44,7 @@ bool ultimoEstadoBoton = false; // Para detectar flancos del botón
 bool btnPress = false; // Para detectar flancos del botón
 unsigned long ultimoDebounce = 0;
 const unsigned long DEBOUNCE_DELAY = 50;
+const unsigned long FOCO_DELAY = 2000;
 
 // Servidor web
 WiFiServer server(80);
@@ -51,11 +53,29 @@ WiFiServer server(80);
 ArduinoLEDMatrix matrix;
 
 // Iconos para la matriz LED (8x12) - Formato correcto para Arduino_LED_Matrix
+// const uint32_t iconoFocoON[] = {
+//   0x3C42A5A5,
+//   0xA542423C,
+//   0x18181800
+// };
 const uint32_t iconoFocoON[] = {
-  0x3C42A5A5,
-  0xA542423C,
-  0x18181800
+		0x7228a48a,
+		0x88b08a88,
+		0xa48a2722
 };
+
+// byte iconoFocoON[3] = {
+//   // O      K
+//   {0,1,1,1,0,0,1,0,0,0,1,0},  // Fila 0
+//   {1,0,0,0,1,0,1,0,0,1,0,0},  // Fila 1
+//   {1,0,0,0,1,0,1,0,1,0,0,0},  // Fila 2
+//   {1,0,0,0,1,0,1,1,0,0,0,0},  // Fila 3
+//   {1,0,0,0,1,0,1,1,0,0,0,0},  // Fila 4
+//   {1,0,0,0,1,0,1,0,1,0,0,0},  // Fila 5
+//   {1,0,0,0,1,0,1,0,0,1,0,0},  // Fila 6
+//   {0,1,1,1,0,0,1,0,0,0,1,0}   // Fila 7
+// };
+
 
 const uint32_t iconoFocoOFF[] = {
   0x3C424242,
@@ -64,9 +84,9 @@ const uint32_t iconoFocoOFF[] = {
 };
 
 const uint32_t iconoWiFi[] = {
-  0x0E04040E,
-  0x0004040E,
-  0x00000400
+    0x19819,
+    0x80000001,
+    0x81f8000
 };
 
 // Animaciones para la matriz
@@ -84,21 +104,54 @@ void setup() {
   
   // Configurar pines
   pinMode(BOTON_PIN, INPUT);      // Botón con pull-down externa
-  pinMode(RELE_CANAL1, OUTPUT);   // Canal 1 - Foco
+  pinMode(RELE_CANAL1, OUTPUT);   // Canal 1 - Foco 1
+  pinMode(LED_CANAL1, OUTPUT);   // Canal 1 - Led 1
   pinMode(RELE_CANAL2, OUTPUT);   // Canal 2 - Disponible
   pinMode(RELE_CANAL3, OUTPUT);   // Canal 3 - Disponible
   pinMode(RELE_CANAL4, OUTPUT);   // Canal 4 - Disponible
   
   // Inicializar relés (módulo activo LOW)
   digitalWrite(RELE_CANAL1, HIGH); // OFF inicial
+  digitalWrite(LED_CANAL1, LOW); // OFF inicial
   digitalWrite(RELE_CANAL2, HIGH); // OFF
   digitalWrite(RELE_CANAL3, HIGH); // OFF
   digitalWrite(RELE_CANAL4, HIGH); // OFF
   Serial.println("✓ Relés inicializados (todos OFF)");
   
   // Inicializar matriz LED
+  // matrix.begin();
+  // mostrarIconoWiFi();
+
+  // matrix.begin();
+
+  // matrix.beginDraw();
+  // matrix.stroke(0xFFFFFFFF);
+  // // add some static text
+  // // will only show "UNO" (not enough space on the display)
+  // const char text[] = "UNO r4";
+  // matrix.textFont(Font_4x6);
+  // matrix.beginText(0, 1, 0xFFFFFF);
+  // matrix.println(text);
+  // matrix.endText();
+
+  // matrix.endDraw();
+
+  // Mostrar mensaje de bienvenida
+  // Make it scroll!
   matrix.begin();
-  mostrarIconoWiFi();
+  matrix.beginDraw();
+  matrix.stroke(0xFFFFFFFF);
+  matrix.textScrollSpeed(50);
+  // add the text
+  const char text[] = "    Seniales    ";
+  matrix.textFont(Font_5x7);
+  matrix.beginText(0, 1, 0xFFFFFF);
+  matrix.println(text);
+  matrix.endText(SCROLL_LEFT);
+  matrix.endDraw();  
+
+  delay(2000);
+
   Serial.println("✓ Matriz LED inicializada");
   
   // Conectar a WiFi
@@ -117,6 +170,22 @@ void setup() {
 }
 
 void loop() {
+
+  // // Make it scroll!
+  // matrix.beginDraw();
+
+  // matrix.stroke(0xFFFFFFFF);
+  // matrix.textScrollSpeed(50);
+
+  // // add the text
+  // const char text[] = "    Hello World!    ";
+  // matrix.textFont(Font_5x7);
+  // matrix.beginText(0, 1, 0xFFFFFF);
+  // matrix.println(text);
+  // matrix.endText(SCROLL_LEFT);
+
+  // matrix.endDraw();
+
   // Manejar botón físico
   manejarBoton();
   
@@ -158,6 +227,18 @@ void conectarWiFi() {
     Serial.print("📶 Señal: ");
     Serial.print(WiFi.RSSI());
     Serial.println(" dBm");
+    // Mostrar mensaje de conexion wifi exitosa
+    // Make it scroll!
+    matrix.beginDraw();
+    matrix.stroke(0xFFFFFFFF);
+    matrix.textScrollSpeed(50);
+    // add the text
+    const char text[] = "    ✅ WiFi conectado exitosamente!    ";
+    matrix.textFont(Font_5x7);
+    matrix.beginText(0, 1, 0xFFFFFF);
+    matrix.println(text);
+    matrix.endText(SCROLL_LEFT);
+    matrix.endDraw();    
   } else {
     Serial.println();
     Serial.println("❌ Error: No se pudo conectar a WiFi");
@@ -210,6 +291,31 @@ void manejarBoton() {
   }
   
   ultimoEstadoBoton = estadoActualBoton;
+}
+
+void encenderFoco() {
+  if (!estadoFoco) {
+    estadoFoco = true;
+    digitalWrite(RELE_CANAL1, LOW);  // Módulo activo LOW
+    digitalWrite(LED_CANAL1, HIGH);  // Led 1 On
+    actualizarMatrizLED();
+    Serial.println("✅ Foco ENCENDIDO - Canal 1 activado");
+  } else {
+    Serial.println("ℹ️ El foco ya estaba encendido");
+  }
+}
+
+void apagarFoco() {
+  if (estadoFoco) {
+    delay(FOCO_DELAY);
+    estadoFoco = false;
+    digitalWrite(RELE_CANAL1, HIGH); // Módulo activo LOW
+    digitalWrite(LED_CANAL1, LOW);  // Led 1 Off
+    actualizarMatrizLED();
+    Serial.println("❌ Foco APAGADO - Canal 1 desactivado");
+  } else {
+    // Serial.println("ℹ️ El foco ya estaba apagado");
+  }
 }
 
 void manejarClienteWeb() {
@@ -402,29 +508,6 @@ void enviarPaginaWeb(WiFiClient client) {
   client.println("</html>");
 }
 
-void encenderFoco() {
-  if (!estadoFoco) {
-    estadoFoco = true;
-    digitalWrite(RELE_CANAL1, LOW);  // Módulo activo LOW
-    actualizarMatrizLED();
-    Serial.println("✅ Foco ENCENDIDO - Canal 1 activado");
-  } else {
-    Serial.println("ℹ️ El foco ya estaba encendido");
-  }
-}
-
-void apagarFoco() {
-  if (estadoFoco) {
-    delay(3000);
-    estadoFoco = false;
-    digitalWrite(RELE_CANAL1, HIGH); // Módulo activo LOW
-    actualizarMatrizLED();
-    Serial.println("❌ Foco APAGADO - Canal 1 desactivado");
-  } else {
-    // Serial.println("ℹ️ El foco ya estaba apagado");
-  }
-}
-
 void toggleFoco() {
   if (estadoFoco) {
     apagarFoco();
@@ -435,9 +518,9 @@ void toggleFoco() {
 
 void actualizarMatrizLED() {
   if (estadoFoco) {
-    matrix.loadFrame(iconoFocoON);
+    // matrix.loadFrame(iconoFocoON);
   } else {
-    matrix.loadFrame(iconoFocoOFF);
+    // matrix.loadFrame(iconoFocoOFF);
   }
 }
 
