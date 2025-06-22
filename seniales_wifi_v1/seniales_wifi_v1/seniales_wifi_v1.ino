@@ -1,7 +1,7 @@
 /*
  * Sistema de Control de 12 Tiras LED - Arduino UNO R4 WiFi (Maestro)
  * Autor: Sistema LED Control
- * Versión: 2.0
+ * Versión: 2.2 - Corregido
  * 
  * Funcionalidades:
  * - Punto de acceso WiFi autónomo
@@ -473,6 +473,66 @@ void executeAutoMode() {
   else if (currentEffect == "random") executeRandomEffect();
 }
 
+// =============================================================================
+// SERVIDOR WEB Y API
+// =============================================================================
+
+void handleWebClients() {
+  WiFiClient client = server.available();
+  if (client) {
+    String request = client.readStringUntil('\r');
+    client.flush();
+    
+    // Procesar comandos de la interfaz web
+    if (request.indexOf("/api/toggle") != -1) {
+      handleToggleRequest(client, request);
+      return;
+    }
+    else if (request.indexOf("/api/command") != -1) {
+      handleCommandRequest(client, request);
+      return;
+    }
+    else if (request.indexOf("/api/status") != -1) {
+      handleApiStatusRequest(client);
+      return;
+    }
+    else if (request.indexOf("/api/modules") != -1) {
+      handleApiModulesRequest(client);
+      return;
+    }
+    
+    // Generar respuesta HTML para la página principal
+    String html = generateWebInterface();
+    
+    client.println("HTTP/1.1 200 OK");
+    client.println("Content-Type: text/html; charset=UTF-8");
+    client.println("Connection: close");
+    client.println();
+    client.println(html);
+    
+    client.stop();
+  }
+}
+
+void handleApiClients() {
+  WiFiClient client = apiServer.available();
+  if (client) {
+    String request = client.readStringUntil('\r');
+    client.flush();
+    
+    // Procesar registro de módulo
+    if (request.indexOf("/register") != -1) {
+      handleModuleRegistration(client, request);
+    }
+    // Procesar heartbeat
+    else if (request.indexOf("/heartbeat") != -1) {
+      handleHeartbeat(client, request);
+    }
+    
+    client.stop();
+  }
+}
+
 void handleToggleRequest(WiFiClient& client, String request) {
   // Extraer ID del módulo
   int idStart = request.indexOf("id=") + 3;
@@ -612,154 +672,6 @@ void handleHeartbeat(WiFiClient& client, String request) {
 }
 
 // =============================================================================
-// SERVIDOR WEB Y API
-// =============================================================================
-
-void handleWebClients() {
-  WiFiClient client = server.available();
-  if (client) {
-    String request = client.readStringUntil('\r');
-    client.flush();
-    
-    // Procesar comandos de la interfaz web
-    if (request.indexOf("/api/toggle") != -1) {
-      handleToggleRequest(client, request);
-      return;
-    }
-    else if (request.indexOf("/api/command") != -1) {
-      handleCommandRequest(client, request);
-      return;
-    }
-    else if (request.indexOf("/api/status") != -1) {
-      handleApiStatusRequest(client);
-      return;
-    }
-    else if (request.indexOf("/api/modules") != -1) {
-      handleApiModulesRequest(client);
-      return;
-    }
-    
-    // Generar respuesta HTML para la página principal
-    String html = generateWebInterface();
-    
-    client.println("HTTP/1.1 200 OK");
-    client.println("Content-Type: text/html; charset=UTF-8");
-    client.println("Connection: close");
-    client.println();
-    client.println(html);
-    
-    client.stop();
-  }
-}
-
-void handleApiClients() {
-  WiFiClient client = apiServer.available();
-  if (client) {
-    String request = client.readStringUntil('\r');
-    client.flush();
-    
-    // Procesar registro de módulo
-    if (request.indexOf("/register") != -1) {
-      handleModuleRegistration(client, request);
-    }
-    // Procesar heartbeat
-    else if (request.indexOf("/heartbeat") != -1) {
-      handleHeartbeat(client, request);
-    }
-    
-    client.stop();
-  }
-}
-
-void handleModuleRegistration(WiFiClient& client, String request) {
-  // Extraer ID del módulo de la URL
-  int idStart = request.indexOf("id=") + 3;
-  int idEnd = request.indexOf(" ", idStart);
-  if (idEnd == -1) idEnd = request.indexOf("&", idStart);
-  if (idEnd == -1) idEnd = request.length();
-  
-  int moduleId = request.substring(idStart, idEnd).toInt();
-  
-  if (moduleId >= 1 && moduleId <= MAX_MODULES) {
-    int index = moduleId - 1;
-    modules[index].ip = client.remoteIP();
-    modules[index].isOnline = true;
-    modules[index].lastHeartbeat = millis();
-    modules[index].status = "online";
-    
-    // Incrementar contador si es un módulo nuevo
-    bool isNewModule = true;
-    for (int i = 0; i < registeredModules; i++) {
-      if (modules[i].id == moduleId && modules[i].ip == client.remoteIP()) {
-        isNewModule = false;
-        break;
-      }
-    }
-    
-    if (isNewModule && registeredModules < MAX_MODULES) {
-      registeredModules++;
-    }
-    
-    Serial.println("Módulo " + String(moduleId) + " registrado desde IP: " + client.remoteIP().toString());
-    
-    // Respuesta de éxito
-    client.println("HTTP/1.1 200 OK");
-    client.println("Content-Type: application/json");
-    client.println("Connection: close");
-    client.println();
-    client.println("{\"status\":\"registered\",\"id\":" + String(moduleId) + "}");
-  } else {
-    // ID inválido
-    client.println("HTTP/1.1 400 Bad Request");
-    client.println("Connection: close");
-    client.println();
-    client.println("{\"error\":\"Invalid module ID\"}");
-  }
-}
-
-void handleHeartbeat(WiFiClient& client, String request) {
-  // Extraer ID del módulo
-  int idStart = request.indexOf("id=") + 3;
-  int idEnd = request.indexOf(" ", idStart);
-  if (idEnd == -1) idEnd = request.indexOf("&", idStart);
-  if (idEnd == -1) idEnd = request.length();
-  
-  int moduleId = request.substring(idStart, idEnd).toInt();
-  
-  if (moduleId >= 1 && moduleId <= MAX_MODULES) {
-    int index = moduleId - 1;
-    modules[index].lastHeartbeat = millis();
-    modules[index].isOnline = true;
-    
-    client.println("HTTP/1.1 200 OK");
-    client.println("Content-Type: application/json");
-    client.println("Connection: close");
-    client.println();
-    client.println("{\"status\":\"ok\"}");
-  }
-}
-
-void handleApiRequest(WiFiClient& client, String request) {
-  String response = "{\"error\":\"Unknown API endpoint\"}";
-  String statusCode = "404 Not Found";
-  
-  if (request.indexOf("/api/status") != -1) {
-    response = generateStatusJson();
-    statusCode = "200 OK";
-  }
-  else if (request.indexOf("/api/modules") != -1) {
-    response = generateModulesJson();
-    statusCode = "200 OK";
-  }
-  
-  client.println("HTTP/1.1 " + statusCode);
-  client.println("Content-Type: application/json");
-  client.println("Connection: close");
-  client.println();
-  client.println(response);
-}
-
-// =============================================================================
 // GENERACIÓN DE INTERFACES
 // =============================================================================
 
@@ -868,55 +780,8 @@ String generateModulesJson() {
   return json;
 }
 
-void handleToggleRequest(WiFiClient& client, String request) {
-  // Extraer ID del módulo
-  int idStart = request.indexOf("id=") + 3;
-  int idEnd = request.indexOf(" ", idStart);
-  if (idEnd == -1) idEnd = request.indexOf("&", idStart);
-  if (idEnd == -1) idEnd = request.length();
-  
-  int moduleId = request.substring(idStart, idEnd).toInt();
-  
-  if (moduleId >= 1 && moduleId <= MAX_MODULES) {
-    int index = moduleId - 1;
-    bool newState = !modules[index].isOn;
-    controlModule(moduleId, newState);
-    
-    client.println("HTTP/1.1 200 OK");
-    client.println("Content-Type: application/json");
-    client.println("Connection: close");
-    client.println();
-    client.println("{\"status\":\"ok\",\"module\":" + String(moduleId) + ",\"state\":" + (newState ? "true" : "false") + "}");
-  } else {
-    client.println("HTTP/1.1 400 Bad Request");
-    client.println("Connection: close");
-    client.println();
-    client.println("{\"error\":\"Invalid module ID\"}");
-  }
-}
-
-void handleCommandRequest(WiFiClient& client, String request) {
-  // Extraer comando
-  int cmdStart = request.indexOf("cmd=") + 4;
-  int cmdEnd = request.indexOf(" ", cmdStart);
-  if (cmdEnd == -1) cmdEnd = request.indexOf("&", cmdStart);
-  if (cmdEnd == -1) cmdEnd = request.length();
-  
-  String command = request.substring(cmdStart, cmdEnd);
-  command.toLowerCase();
-  
-  // Procesar comando
-  processCommand(command);
-  
-  client.println("HTTP/1.1 200 OK");
-  client.println("Content-Type: application/json");
-  client.println("Connection: close");
-  client.println();
-  client.println("{\"status\":\"ok\",\"command\":\"" + command + "\"}");
-}
-
 // =============================================================================
-// FUNCIONES AUXILIARES
+// MONITOREO Y DIAGNÓSTICO
 // =============================================================================
 
 void checkModulesHeartbeat() {
