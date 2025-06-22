@@ -1,19 +1,20 @@
 /*
- * Sistema de Control de Tiras LED - ESP8266-01S (Módulo Cliente)
- * Autor: Sistema LED Control
+ * Sistema de Control de Focos - ESP8266-01S (Módulo Cliente)
+ * Autor: Sistema Control de Iluminación
  * Versión: 3.0 - Con apagado automático
  * 
  * IMPORTANTE: Cambiar MODULE_ID para cada módulo (1-12)
  * 
  * Cambios en v3.0:
- * - Cambiado a GPIO2 para el relevador (más estable que GPIO0)
+ * - Usando GPIO0 para el relevador (con resistencia pull-up 10K)
+ * - Control de focos de 10W en lugar de tiras LED
  * - Agregado apagado automático después de 3 segundos
  * - El módulo se apaga solo sin necesidad de señal del maestro
  * 
  * Funcionalidades:
  * - Conexión automática al Arduino UNO R4 WiFi
  * - Auto-registro con ID único
- * - Control de relevador para tira LED 24V
+ * - Control de relevador para foco de 10W
  * - Apagado automático después de 3 segundos
  * - Servidor HTTP integrado
  * - Sistema de heartbeat automático
@@ -21,8 +22,8 @@
  * - Interfaz web individual
  * 
  * Conexiones:
- * GPIO2 → Control relevador (CAMBIADO!)
- * GPIO3 → LED indicador estado (RX - opcional)
+ * GPIO0 → Control relevador (con resistencia pull-up 10K a 3.3V)
+ * GPIO2 → LED indicador estado
  * VCC → 3.3V | GND → Tierra
  */
 
@@ -111,10 +112,11 @@ void setup() {
   
   Serial.println();
   Serial.println("========================================");
-  Serial.println("    MODULO LED ESP8266-01S v3.0");
+  Serial.println("    MODULO CONTROL FOCO ESP8266-01S v3.0");
   Serial.println("========================================");
   Serial.println("ID: " + String(MODULE_ID));
   Serial.println("Version: 3.0 - Auto-off 3 segundos");
+  Serial.println("Foco: 10W");
   Serial.println("Inicializando...");
   
   // Configurar pines ANTES de cualquier otra cosa
@@ -206,9 +208,10 @@ void handleAutoOff() {
 
 void initializePins() {
   Serial.println("--- CONFIGURANDO PINES ---");
-  Serial.println("⚠️  ADVERTENCIA: Usando GPIO0 para relay");
+  Serial.println("⚠️  ADVERTENCIA: Usando GPIO0 para relay de foco 10W");
   Serial.println("   IMPORTANTE: Agregar resistencia pull-up 10K entre GPIO0 y 3.3V");
   Serial.println("   Esto evita problemas de arranque en modo programación");
+  Serial.println("   Carga máxima: Foco de 10W");
   
   // CRÍTICO: Establecer GPIO0 en HIGH antes de configurar como OUTPUT
   digitalWrite(RELAY_PIN, RELAY_OFF);  // Asegurar estado OFF
@@ -481,12 +484,12 @@ void setRelayState(bool state, bool activateTimer) {
   if (state) {
     digitalWrite(RELAY_PIN, RELAY_ON);
     digitalWrite(STATUS_LED_PIN, HIGH);
-    Serial.println("🔌 Relevador ACTIVADO");
+    Serial.println("💡 Foco ENCENDIDO");
     Serial.println("   GPIO0 = " + String(RELAY_ON == HIGH ? "HIGH" : "LOW"));
   } else {
     digitalWrite(RELAY_PIN, RELAY_OFF);
     digitalWrite(STATUS_LED_PIN, LOW);
-    Serial.println("🔌 Relevador DESACTIVADO");
+    Serial.println("💡 Foco APAGADO");
     Serial.println("   GPIO0 = " + String(RELAY_OFF == HIGH ? "HIGH" : "LOW"));
   }
   
@@ -663,7 +666,7 @@ String generateInfoJson() {
   json += "\"module\":{";
   json += "\"id\":" + String(MODULE_ID) + ",";
   json += "\"version\":\"3.0\",";
-  json += "\"features\":[\"auto-off\",\"3-second-timer\",\"gpio2-relay\"],";
+  json += "\"features\":[\"auto-off\",\"3-second-timer\",\"gpio0-relay\",\"10w-bulb\"],";
   json += "\"hardware\":\"ESP8266-01S\"";
   json += "},";
   json += "\"network\":{";
@@ -694,7 +697,7 @@ String generateWebInterface() {
   String html = "<!DOCTYPE html><html lang='es'><head>";
   html += "<meta charset='UTF-8'>";
   html += "<meta name='viewport' content='width=device-width, initial-scale=1.0'>";
-  html += "<title>Módulo LED " + String(MODULE_ID) + "</title>";
+  html += "<title>Módulo Foco " + String(MODULE_ID) + "</title>";
   html += "<style>";
   html += "body{font-family:-apple-system,BlinkMacSystemFont,Arial,sans-serif;margin:0;padding:20px;background:linear-gradient(135deg,#667eea 0%,#764ba2 100%);min-height:100vh;color:#333}";
   html += ".container{max-width:400px;margin:0 auto;background:rgba(255,255,255,0.95);backdrop-filter:blur(10px);border-radius:20px;padding:30px;box-shadow:0 20px 40px rgba(0,0,0,0.1)}";
@@ -725,8 +728,8 @@ String generateWebInterface() {
   
   // Header
   html += "<div class='header'>";
-  html += "<div class='module-id'>🔆 Módulo " + String(MODULE_ID) + "</div>";
-  html += "<div style='color:#666'>Controlador de Tira LED v3.0</div>";
+  html += "<div class='module-id'>💡 Foco " + String(MODULE_ID) + "</div>";
+  html += "<div style='color:#666'>Controlador de Foco 10W v3.0</div>";
   html += "</div>";
   
   // Estado actual
@@ -777,10 +780,10 @@ String generateWebInterface() {
   
   // Footer
   html += "<div class='footer'>";
-  html += "Sistema LED Control v3.0<br>";
-  html += "ESP8266-01S • ID: " + String(MODULE_ID) + "<br>";
+  html += "Sistema Control de Focos v3.0<br>";
+  html += "ESP8266-01S • Foco " + String(MODULE_ID) + " (10W)<br>";
   html += "⏰ Auto-off: 3 segundos<br>";
-  html += "📍 Relay: GPIO2 (estable)";
+  html += "📍 Relay: GPIO0 (con pull-up 10K)";
   html += "</div>";
   
   html += "</div>";

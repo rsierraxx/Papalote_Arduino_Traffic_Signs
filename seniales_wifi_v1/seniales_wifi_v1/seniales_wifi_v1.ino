@@ -1,6 +1,6 @@
 /*
- * Sistema de Control de 12 Tiras LED - Arduino UNO R4 WiFi (Maestro)
- * Autor: Sistema LED Control
+ * Sistema de Control de 12 Focos - Arduino UNO R4 WiFi (Maestro)
+ * Autor: Sistema Control de Iluminación
  * Versión: 3.0 - Sin apagado automático
  * 
  * Cambios en v3.0:
@@ -10,7 +10,7 @@
  * 
  * Funcionalidades:
  * - Punto de acceso WiFi autónomo
- * - Control de 12 módulos ESP8266-01S
+ * - Control de 12 módulos ESP8266-01S (focos de 10W)
  * - Sistema de registro automático de módulos
  * - Efectos predefinidos y personalizables
  * - Monitoreo de estado en tiempo real
@@ -101,10 +101,10 @@ void setup() {
   Serial.begin(115200);
   delay(1000);
   
-  Serial.println("\n=== SISTEMA DE CONTROL DE TIRAS LED v3.0 ===");
+  Serial.println("\n=== SISTEMA DE CONTROL DE FOCOS v3.0 ===");
   Serial.println("Inicializando Arduino UNO R4 WiFi como Punto de Acceso...");
   Serial.println("IMPORTANTE: Clientes ESP8266 configurados con:");
-  Serial.println("  - GPIO2 para control de relevador");
+  Serial.println("  - GPIO0 para control de relevador (focos 10W)");
   Serial.println("  - Apagado automático: 3 segundos");
   Serial.println("  - Sin control de apagado desde maestro");
   
@@ -518,7 +518,7 @@ bool controlModule(int moduleId, bool state) {
 }
 
 void controlAllModules(bool state) {
-  Serial.println(state ? "Encendiendo todas las tiras..." : "Apagando todas las tiras...");
+  Serial.println(state ? "Encendiendo todos los focos..." : "Apagando todos los focos...");
   
   int successCount = 0;
   for (int i = 0; i < MAX_MODULES; i++) {
@@ -530,9 +530,9 @@ void controlAllModules(bool state) {
     }
   }
   
-  Serial.println("Comando ejecutado en " + String(successCount) + " módulos");
+  Serial.println("Comando ejecutado en " + String(successCount) + " focos");
   if (state) {
-    Serial.println("⏰ Todos los módulos se apagarán automáticamente en 3 segundos");
+    Serial.println("⏰ Todos los focos se apagarán automáticamente en 3 segundos");
   }
 }
 
@@ -917,7 +917,7 @@ void handleHeartbeat(WiFiClient& client, String request) {
 
 String generateWebInterface() {
   String html = "<!DOCTYPE html><html><head>";
-  html += "<title>Control de Tiras LED</title>";
+  html += "<title>Control de Focos</title>";
   html += "<meta name='viewport' content='width=device-width, initial-scale=1'>";
   html += "<style>";
   html += "body{font-family:Arial;margin:20px;background:#f0f0f0}";
@@ -934,12 +934,12 @@ String generateWebInterface() {
   html += "</style></head><body>";
   
   html += "<div class='container'>";
-  html += "<h1>🌈 Sistema de Control LED v3.0</h1>";
+  html += "<h1>💡 Sistema de Control de Focos</h1>";
   
   // Nota sobre el comportamiento
   html += "<div class='note'>";
-  html += "⏰ <strong>Apagado automático:</strong> Los módulos se apagan automáticamente después de 3 segundos<br>";
-  html += "📍 <strong>Hardware:</strong> Clientes ESP8266 usan GPIO2 para relay (más estable)";
+  html += "⏰ <strong>Apagado automático:</strong> Los focos se apagan automáticamente después de 3 segundos<br>";
+  html += "💡 <strong>Hardware:</strong> Control de focos de 10W mediante relevadores";
   html += "</div>";
   
   // Estado del sistema
@@ -1105,7 +1105,8 @@ void printSystemInfo() {
   Serial.println("  Botón 2: Pin " + String(BUTTON2_PIN) + " → Módulo 2");
   Serial.println("  Botón 3: Pin " + String(BUTTON3_PIN) + " → Módulo 3");
   Serial.println("\nConfiguración de clientes ESP8266:");
-  Serial.println("  Pin de relay: GPIO2 (más estable que GPIO0)");
+  Serial.println("  Pin de relay: GPIO0 (con resistencia pull-up 10K)");
+  Serial.println("  Control de focos: 10W por módulo");
   Serial.println("  Apagado automático: 3 segundos");
   Serial.println("  Control: Solo encendido desde maestro");
   Serial.println("==============================\n");
@@ -1114,10 +1115,10 @@ void printSystemInfo() {
 void printCommands() {
   Serial.println("\n=== COMANDOS DISPONIBLES ===");
   Serial.println("COMANDOS SERIE:");
-  Serial.println("on [1-12]     - Encender tira específica");
-  Serial.println("off [1-12]    - Apagar tira específica");
-  Serial.println("all_on        - Encender todas las tiras");
-  Serial.println("all_off       - Apagar todas las tiras");
+  Serial.println("on [1-12]     - Encender foco específico");
+  Serial.println("off [1-12]    - Apagar foco específico");
+  Serial.println("all_on        - Encender todos los focos");
+  Serial.println("all_off       - Apagar todos los focos");
   Serial.println("wave          - Efecto onda secuencial");
   Serial.println("chase         - Efecto persecución");
   Serial.println("blink         - Efecto parpadeo");
