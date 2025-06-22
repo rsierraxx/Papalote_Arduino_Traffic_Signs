@@ -1,546 +1,1010 @@
 /*
-  Control de Foco 50W DC con Arduino Uno R4 WiFi + Módulo Relé 4 Canales
-  
-  Características:
-  - Control local con botón (Pin D2)
-  - Control remoto vía WiFi
-  - Visualización en matriz LED 12x8
-  - Módulo relé 4 canales (solo canal 1 en uso)
-  - Interfaz web para control
-  
-  Hardware:
-  - Arduino Uno R4 WiFi
-  - Módulo relé 4 canales (5V, activo LOW)
-  - Botón con resistencia pull-down 10kΩ
-  - Foco 50W DC (12V/24V)
-  
-  Conexiones:
-  - Pin D2: Botón (con pull-down)
-  - Pin D7: Canal 1 del módulo relé (Foco)
-  - Pin D8: Canal 2 (disponible)
-  - Pin D9: Canal 3 (disponible)
-  - Pin D10: Canal 4 (disponible)
-*/
+ * Sistema de Control de 12 Tiras LED - Arduino UNO R4 WiFi (Maestro)
+ * Autor: Sistema LED Control
+ * Versión: 2.0
+ * 
+ * Funcionalidades:
+ * - Punto de acceso WiFi autónomo
+ * - Control de 12 módulos ESP8266-01S
+ * - Sistema de registro automático de módulos
+ * - Efectos predefinidos y personalizables
+ * - Monitoreo de estado en tiempo real
+ * - Servidor web para interfaz de control
+ * - Sistema de heartbeat y reconexión
+ */
 
-#include <WiFiS3.h>
-#include <ArduinoGraphics.h>
-#include <Arduino_LED_Matrix.h>
+#include "WiFiS3.h"
+
+// =============================================================================
+// CONFIGURACIÓN DEL SISTEMA
+// =============================================================================
 
 // Configuración WiFi
-const char* ssid = "Darth_Router";           // Cambia por tu red WiFi
-const char* password = "2WC456403581";   // Cambia por tu contraseña
+const char* ssid = "LED_CONTROL_SYSTEM";
+const char* password = "12345678";
+const IPAddress local_IP(192, 168, 4, 1);
+const IPAddress gateway(192, 168, 4, 1);
+const IPAddress subnet(255, 255, 255, 0);
 
-// Configuración de pines
-const int BOTON_PIN = 2;        // Botón físico
-const int RELE_CANAL1 = 7;      // Canal 1 - Foco 1
-const int LED_CANAL1 = 3;      // Canal 1 - Led 1
-const int RELE_CANAL2 = 8;      // Canal 2 - Disponible
-const int RELE_CANAL3 = 9;      // Canal 3 - Disponible  
-const int RELE_CANAL4 = 10;     // Canal 4 - Disponible
+// Configuración del sistema
+#define MAX_MODULES 12
+#define HEARTBEAT_INTERVAL 60000  // 60 segundos
+#define MODULE_TIMEOUT 120000     // 2 minutos para considerar módulo offline
+#define EFFECT_DELAY_DEFAULT 500  // Delay por defecto para efectos (ms)
 
-// Estados del sistema
-bool estadoFoco = false;        // Estado actual del foco
-bool ultimoEstadoBoton = false; // Para detectar flancos del botón
-bool btnPress = false; // Para detectar flancos del botón
-unsigned long ultimoDebounce = 0;
-const unsigned long DEBOUNCE_DELAY = 50;
-const unsigned long FOCO_DELAY = 2000;
-
-// Servidor web
+// Puertos
 WiFiServer server(80);
+WiFiServer apiServer(8080);
 
-// Matriz LED
-ArduinoLEDMatrix matrix;
+// =============================================================================
+// ESTRUCTURA DE DATOS
+// =============================================================================
 
-// Iconos para la matriz LED (8x12) - Formato correcto para Arduino_LED_Matrix
-// const uint32_t iconoFocoON[] = {
-//   0x3C42A5A5,
-//   0xA542423C,
-//   0x18181800
-// };
-const uint32_t iconoFocoON[] = {
-		0x7228a48a,
-		0x88b08a88,
-		0xa48a2722
+struct ModuleInfo {
+  uint8_t id;
+  IPAddress ip;
+  bool isOnline;
+  bool isOn;
+  unsigned long lastHeartbeat;
+  String status;
 };
 
-// byte iconoFocoON[3] = {
-//   // O      K
-//   {0,1,1,1,0,0,1,0,0,0,1,0},  // Fila 0
-//   {1,0,0,0,1,0,1,0,0,1,0,0},  // Fila 1
-//   {1,0,0,0,1,0,1,0,1,0,0,0},  // Fila 2
-//   {1,0,0,0,1,0,1,1,0,0,0,0},  // Fila 3
-//   {1,0,0,0,1,0,1,1,0,0,0,0},  // Fila 4
-//   {1,0,0,0,1,0,1,0,1,0,0,0},  // Fila 5
-//   {1,0,0,0,1,0,1,0,0,1,0,0},  // Fila 6
-//   {0,1,1,1,0,0,1,0,0,0,1,0}   // Fila 7
-// };
+ModuleInfo modules[MAX_MODULES];
+uint8_t registeredModules = 0;
 
+// =============================================================================
+// VARIABLES GLOBALES
+// =============================================================================
 
-const uint32_t iconoFocoOFF[] = {
-  0x3C424242,
-  0x42423C18,
-  0x18180000  
-};
+bool autoMode = false;
+bool effectRunning = false;
+String currentEffect = "none";
+unsigned long lastHeartbeatCheck = 0;
+unsigned long lastEffectUpdate = 0;
+int effectDelay = EFFECT_DELAY_DEFAULT;
+int effectStep = 0;
 
-const uint32_t iconoWiFi[] = {
-    0x19819,
-    0x80000001,
-    0x81f8000
-};
-
-// Animaciones para la matriz
-const uint32_t animacionConectando[][3] = {
-  {0x08000800, 0x08000800, 0x08000000},
-  {0x18001800, 0x18001800, 0x18000000},
-  {0x3C003C00, 0x3C003C00, 0x3C000000}
-};
+// =============================================================================
+// CONFIGURACIÓN INICIAL
+// =============================================================================
 
 void setup() {
   Serial.begin(115200);
-  Serial.println("=================================");
-  Serial.println("Control de Foco WiFi - Arduino R4");
-  Serial.println("=================================");
+  delay(1000);
   
-  // Configurar pines
-  pinMode(BOTON_PIN, INPUT);      // Botón con pull-down externa
-  pinMode(RELE_CANAL1, OUTPUT);   // Canal 1 - Foco 1
-  pinMode(LED_CANAL1, OUTPUT);   // Canal 1 - Led 1
-  pinMode(RELE_CANAL2, OUTPUT);   // Canal 2 - Disponible
-  pinMode(RELE_CANAL3, OUTPUT);   // Canal 3 - Disponible
-  pinMode(RELE_CANAL4, OUTPUT);   // Canal 4 - Disponible
+  Serial.println("\n=== SISTEMA DE CONTROL DE TIRAS LED ===");
+  Serial.println("Inicializando Arduino UNO R4 WiFi como Punto de Acceso...");
   
-  // Inicializar relés (módulo activo LOW)
-  digitalWrite(RELE_CANAL1, HIGH); // OFF inicial
-  digitalWrite(LED_CANAL1, LOW); // OFF inicial
-  digitalWrite(RELE_CANAL2, HIGH); // OFF
-  digitalWrite(RELE_CANAL3, HIGH); // OFF
-  digitalWrite(RELE_CANAL4, HIGH); // OFF
-  Serial.println("✓ Relés inicializados (todos OFF)");
+  // Inicializar estructura de módulos
+  initializeModules();
   
-  // Inicializar matriz LED
-  // matrix.begin();
-  // mostrarIconoWiFi();
-
-  // matrix.begin();
-
-  // matrix.beginDraw();
-  // matrix.stroke(0xFFFFFFFF);
-  // // add some static text
-  // // will only show "UNO" (not enough space on the display)
-  // const char text[] = "UNO r4";
-  // matrix.textFont(Font_4x6);
-  // matrix.beginText(0, 1, 0xFFFFFF);
-  // matrix.println(text);
-  // matrix.endText();
-
-  // matrix.endDraw();
-
-  // Mostrar mensaje de bienvenida
-  // Make it scroll!
-  matrix.begin();
-  matrix.beginDraw();
-  matrix.stroke(0xFFFFFFFF);
-  matrix.textScrollSpeed(50);
-  // add the text
-  const char text[] = "    Seniales    ";
-  matrix.textFont(Font_5x7);
-  matrix.beginText(0, 1, 0xFFFFFF);
-  matrix.println(text);
-  matrix.endText(SCROLL_LEFT);
-  matrix.endDraw();  
-
-  delay(2000);
-
-  Serial.println("✓ Matriz LED inicializada");
+  // Configurar punto de acceso WiFi
+  if (!setupAccessPoint()) {
+    Serial.println("ERROR: No se pudo crear el punto de acceso");
+    while(1) delay(1000);
+  }
   
-  // Conectar a WiFi
-  conectarWiFi();
-  
-  // Iniciar servidor web
+  // Iniciar servidores
   server.begin();
-  Serial.print("✓ Servidor web iniciado en: http://");
-  Serial.println(WiFi.localIP());
+  apiServer.begin();
   
-  // Mostrar estado inicial
-  actualizarMatrizLED();
-  mostrarInfoSistema();
-  Serial.println("🚀 Sistema listo para usar!");
-  Serial.println("=================================");
+  Serial.println("\n=== SISTEMA LISTO ===");
+  printSystemInfo();
+  printCommands();
 }
+
+// =============================================================================
+// BUCLE PRINCIPAL
+// =============================================================================
 
 void loop() {
-
-  // // Make it scroll!
-  // matrix.beginDraw();
-
-  // matrix.stroke(0xFFFFFFFF);
-  // matrix.textScrollSpeed(50);
-
-  // // add the text
-  // const char text[] = "    Hello World!    ";
-  // matrix.textFont(Font_5x7);
-  // matrix.beginText(0, 1, 0xFFFFFF);
-  // matrix.println(text);
-  // matrix.endText(SCROLL_LEFT);
-
-  // matrix.endDraw();
-
-  // Manejar botón físico
-  manejarBoton();
+  // Procesar comandos serie
+  handleSerialCommands();
   
-  // Manejar cliente web
-  manejarClienteWeb();
+  // Manejar conexiones web
+  handleWebClients();
   
-  // Mostrar info cada 30 segundos
-  static unsigned long ultimoInfo = 0;
-  if (millis() - ultimoInfo > 30000) {
-    mostrarInfoSistema();
-    ultimoInfo = millis();
-  }
+  // Manejar API REST
+  handleApiClients();
   
-  // Pequeña pausa
-  delay(10);
+  // Verificar heartbeat de módulos
+  checkModulesHeartbeat();
+  
+  // Ejecutar efectos automáticos
+  handleEffects();
+  
+  delay(10); // Pequeña pausa para estabilidad
 }
 
-void conectarWiFi() {
-  Serial.print("🌐 Conectando a WiFi: ");
+// =============================================================================
+// CONFIGURACIÓN DEL PUNTO DE ACCESO
+// =============================================================================
+
+bool setupAccessPoint() {
+  // Configurar como punto de acceso
+  WiFi.config(local_IP, gateway, subnet);
+  
+  int status = WiFi.beginAP(ssid, password);
+  if (status != WL_AP_LISTENING) {
+    Serial.println("Error al crear punto de acceso");
+    return false;
+  }
+  
+  // Esperar a que se configure
+  delay(2000);
+  
+  Serial.println("Punto de acceso creado exitosamente");
+  Serial.print("SSID: ");
   Serial.println(ssid);
+  Serial.print("IP: ");
+  Serial.println(WiFi.localIP());
+  Serial.print("Password: ");
+  Serial.println(password);
   
-  WiFi.begin(ssid, password);
-  
-  int intentos = 0;
-  while (WiFi.status() != WL_CONNECTED && intentos < 30) {
-    delay(500);
-    Serial.print(".");
-    
-    // Mostrar animación en matriz
-    matrix.loadFrame(animacionConectando[intentos % 3]);
-    intentos++;
+  return true;
+}
+
+// =============================================================================
+// INICIALIZACIÓN DE MÓDULOS
+// =============================================================================
+
+void initializeModules() {
+  for (int i = 0; i < MAX_MODULES; i++) {
+    modules[i].id = i + 1;
+    modules[i].ip = IPAddress(0, 0, 0, 0);
+    modules[i].isOnline = false;
+    modules[i].isOn = false;
+    modules[i].lastHeartbeat = 0;
+    modules[i].status = "offline";
   }
-  
-  if (WiFi.status() == WL_CONNECTED) {
-    Serial.println();
-    Serial.println("✅ WiFi conectado exitosamente!");
-    Serial.print("📍 IP asignada: ");
-    Serial.println(WiFi.localIP());
-    Serial.print("📶 Señal: ");
-    Serial.print(WiFi.RSSI());
-    Serial.println(" dBm");
-    // Mostrar mensaje de conexion wifi exitosa
-    // Make it scroll!
-    matrix.beginDraw();
-    matrix.stroke(0xFFFFFFFF);
-    matrix.textScrollSpeed(50);
-    // add the text
-    const char text[] = "    ✅ WiFi conectado exitosamente!    ";
-    matrix.textFont(Font_5x7);
-    matrix.beginText(0, 1, 0xFFFFFF);
-    matrix.println(text);
-    matrix.endText(SCROLL_LEFT);
-    matrix.endDraw();    
-  } else {
-    Serial.println();
-    Serial.println("❌ Error: No se pudo conectar a WiFi");
-    Serial.println("Verifica SSID y contraseña");
+  registeredModules = 0;
+  Serial.println("Estructura de módulos inicializada");
+}
+
+// =============================================================================
+// MANEJO DE COMANDOS SERIE
+// =============================================================================
+
+void handleSerialCommands() {
+  if (Serial.available()) {
+    String command = Serial.readStringUntil('\n');
+    command.trim();
+    command.toLowerCase();
+    
+    processCommand(command);
   }
 }
 
-void manejarBoton() {
-  bool estadoActualBoton = digitalRead(BOTON_PIN);
-  // Serial.print(">>> estadoActualBoton: ");
-  // Serial.println(ultimoDebounce);
-  // Debounce
-  if (estadoActualBoton != ultimoEstadoBoton) {
-    ultimoDebounce = millis();
-    Serial.println(">>> ----------------------------- <<<");
-    Serial.print(">>> estadoActualBoton: ");
-    Serial.println(estadoActualBoton);
-    // Serial.print(">>> ultimoEstadoBoton: ");
-    // Serial.println(ultimoEstadoBoton);
-    Serial.print(">>> ultimoDebounce: ");
-    Serial.println(ultimoDebounce);
-    Serial.print(">>> DEBOUNCE_DELAY: ");
-    Serial.println(DEBOUNCE_DELAY);
-  }
+void processCommand(String cmd) {
+  Serial.println("Comando recibido: " + cmd);
   
-  if ((millis() - ultimoDebounce) > DEBOUNCE_DELAY) {
-    // Serial.print(">>> Aqui 1");
-    // Serial.print(">>> ultimoDebounce: ");
-    // Serial.println(ultimoDebounce);
-    // Si el botón cambió de LOW a HIGH (presionado)
-    // if (estadoActualBoton && !ultimoEstadoBoton) {
-    // if ((estadoActualBoton == 1) && (ultimoEstadoBoton == 0)) {
-    if (estadoActualBoton == 1) {
-      // Serial.print("==>>> ultimoEstadoBoton: ");
-      // Serial.println(ultimoEstadoBoton);      
-      if (btnPress == false){
-        Serial.println(">>> Aqui 2");
-        btnPress = true;
-        // toggleFoco();
-        encenderFoco();
-        Serial.println("🔘 Botón físico presionado - Estado cambiado");
-        // delay(20);
-      }
-    }else{
-      // Serial.println(">>> Aqui 3");
-      btnPress = false;
-      apagarFoco();
-      // ultimoEstadoBoton = estadoActualBoton;
+  if (cmd.startsWith("on ")) {
+    int moduleId = cmd.substring(3).toInt();
+    if (moduleId >= 1 && moduleId <= MAX_MODULES) {
+      controlModule(moduleId, true);
+    } else {
+      Serial.println("ID de módulo inválido (1-12)");
     }
   }
-  
-  ultimoEstadoBoton = estadoActualBoton;
+  else if (cmd.startsWith("off ")) {
+    int moduleId = cmd.substring(4).toInt();
+    if (moduleId >= 1 && moduleId <= MAX_MODULES) {
+      controlModule(moduleId, false);
+    } else {
+      Serial.println("ID de módulo inválido (1-12)");
+    }
+  }
+  else if (cmd == "all_on") {
+    controlAllModules(true);
+  }
+  else if (cmd == "all_off") {
+    controlAllModules(false);
+    stopEffect();
+  }
+  else if (cmd == "wave") {
+    startEffect("wave");
+  }
+  else if (cmd == "chase") {
+    startEffect("chase");
+  }
+  else if (cmd == "blink") {
+    startEffect("blink");
+  }
+  else if (cmd == "random") {
+    startEffect("random");
+  }
+  else if (cmd == "auto_on") {
+    autoMode = true;
+    startEffect("auto");
+    Serial.println("Modo automático activado");
+  }
+  else if (cmd == "auto_off") {
+    autoMode = false;
+    stopEffect();
+    Serial.println("Modo automático desactivado");
+  }
+  else if (cmd == "status") {
+    printSystemStatus();
+  }
+  else if (cmd == "modules") {
+    printModulesStatus();
+  }
+  else if (cmd == "reset") {
+    resetSystem();
+  }
+  else if (cmd == "help") {
+    printCommands();
+  }
+  else if (cmd.startsWith("speed ")) {
+    int speed = cmd.substring(6).toInt();
+    if (speed >= 100 && speed <= 5000) {
+      effectDelay = speed;
+      Serial.println("Velocidad de efecto ajustada a: " + String(speed) + "ms");
+    } else {
+      Serial.println("Velocidad inválida (100-5000ms)");
+    }
+  }
+  else {
+    Serial.println("Comando no reconocido. Usa 'help' para ver comandos disponibles");
+  }
 }
 
-void encenderFoco() {
-  if (!estadoFoco) {
-    estadoFoco = true;
-    digitalWrite(RELE_CANAL1, LOW);  // Módulo activo LOW
-    digitalWrite(LED_CANAL1, HIGH);  // Led 1 On
-    actualizarMatrizLED();
-    Serial.println("✅ Foco ENCENDIDO - Canal 1 activado");
-  } else {
-    Serial.println("ℹ️ El foco ya estaba encendido");
-  }
-}
+// =============================================================================
+// CONTROL DE MÓDULOS
+// =============================================================================
 
-void apagarFoco() {
-  if (estadoFoco) {
-    delay(FOCO_DELAY);
-    estadoFoco = false;
-    digitalWrite(RELE_CANAL1, HIGH); // Módulo activo LOW
-    digitalWrite(LED_CANAL1, LOW);  // Led 1 Off
-    actualizarMatrizLED();
-    Serial.println("❌ Foco APAGADO - Canal 1 desactivado");
-  } else {
-    // Serial.println("ℹ️ El foco ya estaba apagado");
+bool controlModule(int moduleId, bool state) {
+  if (moduleId < 1 || moduleId > MAX_MODULES) {
+    Serial.println("ID de módulo fuera de rango");
+    return false;
   }
-}
-
-void manejarClienteWeb() {
-  WiFiClient client = server.available();
   
-  if (client) {
-    Serial.println("🌐 Nuevo cliente web conectado");
-    String request = "";
+  int index = moduleId - 1;
+  if (!modules[index].isOnline) {
+    Serial.println("Módulo " + String(moduleId) + " no está online");
+    return false;
+  }
+  
+  WiFiClient client;
+  String url = "http://" + modules[index].ip.toString() + "/" + (state ? "on" : "off");
+  
+  if (client.connect(modules[index].ip, 80)) {
+    String httpRequest = "GET ";
+    httpRequest += (state ? "/on" : "/off");
+    httpRequest += " HTTP/1.1";
+    client.println(httpRequest);
+    client.println("Host: " + modules[index].ip.toString());
+    client.println("Connection: close");
+    client.println();
     
-    while (client.connected()) {
-      if (client.available()) {
-        String line = client.readStringUntil('\r');
-        request += line;
-        
-        if (line.length() == 1 && line[0] == '\n') {
-          break;
-        }
-      }
-    }
-    
-    // Procesar comandos
-    if (request.indexOf("GET /encender") >= 0) {
-      encenderFoco();
-      Serial.println("🌐 Comando web: Encender foco");
-    }
-    else if (request.indexOf("GET /apagar") >= 0) {
-      apagarFoco();
-      Serial.println("🌐 Comando web: Apagar foco");
-    }
-    else if (request.indexOf("GET /toggle") >= 0) {
-      toggleFoco();
-      Serial.println("🌐 Comando web: Toggle foco");
-    }
-    else if (request.indexOf("GET /estado") >= 0) {
-      Serial.println("🌐 Comando web: Consulta de estado");
+    // Esperar respuesta
+    unsigned long timeout = millis() + 3000;
+    while (client.available() == 0 && millis() < timeout) {
+      delay(10);
     }
     
-    // Enviar respuesta HTML
-    enviarPaginaWeb(client);
+    bool success = false;
+    if (client.available()) {
+      String response = client.readString();
+      success = response.indexOf("200 OK") != -1;
+    }
     
     client.stop();
-    Serial.println("🌐 Cliente web desconectado");
+    
+    if (success) {
+      modules[index].isOn = state;
+      Serial.println("Módulo " + String(moduleId) + " " + (state ? "encendido" : "apagado"));
+      return true;
+    } else {
+      Serial.println("Error al controlar módulo " + String(moduleId));
+      return false;
+    }
+  } else {
+    Serial.println("No se pudo conectar al módulo " + String(moduleId));
+    return false;
   }
 }
 
-void enviarPaginaWeb(WiFiClient client) {
+void controlAllModules(bool state) {
+  Serial.println(state ? "Encendiendo todas las tiras..." : "Apagando todas las tiras...");
+  
+  int successCount = 0;
+  for (int i = 0; i < MAX_MODULES; i++) {
+    if (modules[i].isOnline) {
+      if (controlModule(i + 1, state)) {
+        successCount++;
+      }
+      delay(100); // Pequeña pausa entre comandos
+    }
+  }
+  
+  Serial.println("Comando ejecutado en " + String(successCount) + " módulos");
+}
+
+// =============================================================================
+// SISTEMA DE EFECTOS
+// =============================================================================
+
+void startEffect(String effectName) {
+  currentEffect = effectName;
+  effectRunning = true;
+  effectStep = 0;
+  lastEffectUpdate = millis();
+  
+  Serial.println("Iniciando efecto: " + effectName);
+  
+  if (effectName == "auto") {
+    // En modo automático, comenzar con efecto wave
+    currentEffect = "wave";
+  }
+}
+
+void stopEffect() {
+  effectRunning = false;
+  currentEffect = "none";
+  Serial.println("Efecto detenido");
+}
+
+void handleEffects() {
+  if (!effectRunning) return;
+  
+  unsigned long currentTime = millis();
+  if (currentTime - lastEffectUpdate < effectDelay) return;
+  
+  lastEffectUpdate = currentTime;
+  
+  if (currentEffect == "wave") {
+    executeWaveEffect();
+  }
+  else if (currentEffect == "chase") {
+    executeChaseEffect();
+  }
+  else if (currentEffect == "blink") {
+    executeBlinkEffect();
+  }
+  else if (currentEffect == "random") {
+    executeRandomEffect();
+  }
+  else if (currentEffect == "auto") {
+    executeAutoMode();
+  }
+}
+
+void executeWaveEffect() {
+  // Apagar todos los módulos
+  for (int i = 0; i < MAX_MODULES; i++) {
+    if (modules[i].isOnline && modules[i].isOn) {
+      controlModule(i + 1, false);
+    }
+  }
+  
+  delay(50);
+  
+  // Encender módulo actual
+  if (effectStep < MAX_MODULES && modules[effectStep].isOnline) {
+    controlModule(effectStep + 1, true);
+  }
+  
+  effectStep++;
+  if (effectStep >= MAX_MODULES) {
+    effectStep = 0;
+  }
+}
+
+void executeChaseEffect() {
+  static bool direction = true; // true = adelante, false = atrás
+  
+  // Apagar todos
+  for (int i = 0; i < MAX_MODULES; i++) {
+    if (modules[i].isOnline && modules[i].isOn) {
+      controlModule(i + 1, false);
+    }
+  }
+  
+  delay(50);
+  
+  // Encender 3 módulos consecutivos
+  for (int i = 0; i < 3; i++) {
+    int moduleIndex = (effectStep + i) % MAX_MODULES;
+    if (modules[moduleIndex].isOnline) {
+      controlModule(moduleIndex + 1, true);
+    }
+  }
+  
+  if (direction) {
+    effectStep++;
+    if (effectStep >= MAX_MODULES) {
+      effectStep = MAX_MODULES - 1;
+      direction = false;
+    }
+  } else {
+    effectStep--;
+    if (effectStep < 0) {
+      effectStep = 0;
+      direction = true;
+    }
+  }
+}
+
+void executeBlinkEffect() {
+  bool state = (effectStep % 2 == 0);
+  
+  for (int i = 0; i < MAX_MODULES; i++) {
+    if (modules[i].isOnline) {
+      controlModule(i + 1, state);
+    }
+  }
+  
+  effectStep++;
+  if (effectStep >= 10) { // 5 parpadeos
+    effectStep = 0;
+  }
+}
+
+void executeRandomEffect() {
+  // Encender/apagar módulos aleatoriamente
+  for (int i = 0; i < MAX_MODULES; i++) {
+    if (modules[i].isOnline) {
+      bool state = random(0, 2) == 1;
+      controlModule(i + 1, state);
+    }
+  }
+}
+
+void executeAutoMode() {
+  static unsigned long lastModeChange = 0;
+  static int currentAutoEffect = 0;
+  static String autoEffects[] = {"wave", "chase", "blink", "random"};
+  static int numAutoEffects = 4;
+  
+  // Cambiar efecto cada 30 segundos
+  if (millis() - lastModeChange > 30000) {
+    currentAutoEffect = (currentAutoEffect + 1) % numAutoEffects;
+    currentEffect = autoEffects[currentAutoEffect];
+    lastModeChange = millis();
+    effectStep = 0;
+    Serial.println("Auto mode: Cambiando a efecto " + currentEffect);
+  }
+  
+  // Ejecutar efecto actual
+  if (currentEffect == "wave") executeWaveEffect();
+  else if (currentEffect == "chase") executeChaseEffect();
+  else if (currentEffect == "blink") executeBlinkEffect();
+  else if (currentEffect == "random") executeRandomEffect();
+}
+
+void handleToggleRequest(WiFiClient& client, String request) {
+  // Extraer ID del módulo
+  int idStart = request.indexOf("id=") + 3;
+  int idEnd = request.indexOf(" ", idStart);
+  if (idEnd == -1) idEnd = request.indexOf("&", idStart);
+  if (idEnd == -1) idEnd = request.length();
+  
+  int moduleId = request.substring(idStart, idEnd).toInt();
+  
+  if (moduleId >= 1 && moduleId <= MAX_MODULES) {
+    int index = moduleId - 1;
+    bool newState = !modules[index].isOn;
+    bool success = controlModule(moduleId, newState);
+    
+    client.println("HTTP/1.1 200 OK");
+    client.println("Content-Type: application/json");
+    client.println("Connection: close");
+    client.println();
+    client.println("{\"status\":\"" + String(success ? "ok" : "error") + "\",\"module\":" + String(moduleId) + ",\"state\":" + String(newState ? "true" : "false") + "}");
+  } else {
+    client.println("HTTP/1.1 400 Bad Request");
+    client.println("Connection: close");
+    client.println();
+    client.println("{\"error\":\"Invalid module ID\"}");
+  }
+}
+
+void handleCommandRequest(WiFiClient& client, String request) {
+  // Extraer comando
+  int cmdStart = request.indexOf("cmd=") + 4;
+  int cmdEnd = request.indexOf(" ", cmdStart);
+  if (cmdEnd == -1) cmdEnd = request.indexOf("&", cmdStart);
+  if (cmdEnd == -1) cmdEnd = request.length();
+  
+  String command = request.substring(cmdStart, cmdEnd);
+  command.toLowerCase();
+  
+  // Procesar comando
+  processCommand(command);
+  
   client.println("HTTP/1.1 200 OK");
-  client.println("Content-Type: text/html; charset=UTF-8");
+  client.println("Content-Type: application/json");
   client.println("Connection: close");
   client.println();
-  
-  // HTML de la página web
-  client.println("<!DOCTYPE html>");
-  client.println("<html lang='es'>");
-  client.println("<head>");
-  client.println("<title>Control Foco WiFi - Arduino R4</title>");
-  client.println("<meta charset='UTF-8'>");
-  client.println("<meta name='viewport' content='width=device-width, initial-scale=1.0'>");
-  client.println("<style>");
-  client.println("*{margin:0;padding:0;box-sizing:border-box}");
-  client.println("body{font-family:'Segoe UI',Arial,sans-serif;background:linear-gradient(135deg,#667eea 0%,#764ba2 100%);min-height:100vh;padding:20px}");
-  client.println(".container{max-width:800px;margin:0 auto;background:rgba(255,255,255,0.95);padding:30px;border-radius:20px;box-shadow:0 8px 32px rgba(0,0,0,0.1);backdrop-filter:blur(10px)}");
-  client.println("h1{color:#333;text-align:center;margin-bottom:10px;font-size:2.5em;text-shadow:2px 2px 4px rgba(0,0,0,0.1)}");
-  client.println("h2{color:#666;text-align:center;margin-bottom:30px;font-weight:300}");
-  client.println(".status{text-align:center;font-size:28px;margin:30px 0;padding:20px;border-radius:15px;box-shadow:0 4px 15px rgba(0,0,0,0.1);transition:all 0.3s ease}");
-  client.println(".on{background:linear-gradient(135deg,#4ecdc4,#44a08d);color:white;transform:scale(1.02)}");
-  client.println(".off{background:linear-gradient(135deg,#ff9a9e,#fecfef);color:#333}");
-  client.println(".controls{text-align:center;margin:40px 0;display:flex;gap:15px;justify-content:center;flex-wrap:wrap}");
-  client.println(".button{display:inline-block;padding:18px 35px;font-size:18px;font-weight:600;text-decoration:none;border-radius:50px;color:white;text-align:center;min-width:140px;transition:all 0.3s ease;box-shadow:0 4px 15px rgba(0,0,0,0.2)}");
-  client.println(".btn-on{background:linear-gradient(135deg,#56ab2f,#a8e6cf)} .btn-off{background:linear-gradient(135deg,#ff512f,#dd2476)} .btn-toggle{background:linear-gradient(135deg,#4facfe,#00f2fe)}");
-  client.println(".button:hover{transform:translateY(-3px);box-shadow:0 6px 20px rgba(0,0,0,0.3)}");
-  client.println(".info{background:rgba(255,255,255,0.8);padding:25px;border-radius:15px;margin:25px 0;border-left:5px solid #4facfe;box-shadow:0 4px 15px rgba(0,0,0,0.05)}");
-  client.println(".channel{background:rgba(248,249,250,0.8);padding:18px;margin:12px 0;border-radius:12px;border:1px solid rgba(222,226,230,0.8);transition:all 0.3s ease}");
-  client.println(".channel:hover{background:rgba(255,255,255,0.9);transform:translateX(5px)}");
-  client.println(".available{color:#6c757d;font-style:italic}");
-  client.println(".active{color:#28a745;font-weight:bold}");
-  client.println(".inactive{color:#dc3545;font-weight:bold}");
-  client.println(".system-info{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:15px;margin:20px 0}");
-  client.println(".info-card{background:rgba(255,255,255,0.9);padding:15px;border-radius:10px;text-align:center;box-shadow:0 2px 10px rgba(0,0,0,0.05)}");
-  client.println(".refresh{position:fixed;top:20px;right:20px;background:#4facfe;color:white;border:none;padding:10px 15px;border-radius:50px;cursor:pointer;box-shadow:0 4px 15px rgba(0,0,0,0.2)}");
-  client.println("@media (max-width:600px){.controls{flex-direction:column;align-items:center} .button{min-width:80%}}");
-  client.println("</style>");
-  client.println("</head>");
-  client.println("<body>");
-  
-  client.println("<button class='refresh' onclick='location.reload()'>🔄</button>");
-  
-  client.println("<div class='container'>");
-  client.println("<h1>🏠 Control de Foco WiFi</h1>");
-  client.println("<h2>Arduino Uno R4 WiFi + Módulo 4 Canales</h2>");
-  
-  // Estado actual con indicador visual mejorado
-  client.print("<div class='status ");
-  if (estadoFoco) {
-    client.println("on'>💡 FOCO ENCENDIDO<br><small>Sistema activo y funcionando</small></div>");
-  } else {
-    client.println("off'>💡 FOCO APAGADO<br><small>Listo para activar</small></div>");
-  }
-  
-  // Controles principales
-  client.println("<div class='controls'>");
-  client.println("<a href='/encender' class='button btn-on'>🔆 ENCENDER</a>");
-  client.println("<a href='/apagar' class='button btn-off'>🔅 APAGAR</a>");
-  client.println("<a href='/toggle' class='button btn-toggle'>🔄 ALTERNAR</a>");
-  client.println("</div>");
-  
-  // Estado de canales
-  client.println("<div class='info'>");
-  client.println("<h3>📊 Estado de Canales del Módulo Relé</h3>");
-  
-  client.println("<div class='channel'>");
-  client.print("<strong>🔌 Canal 1 (Foco Principal):</strong> ");
-  client.print(estadoFoco ? "<span class='active'>🟢 ACTIVO - Foco encendido</span>" : "<span class='inactive'>🔴 INACTIVO - Foco apagado</span>");
-  client.println("</div>");
-  
-  client.println("<div class='channel'>");
-  client.println("<strong>🔌 Canal 2:</strong> <span class='available'>⚪ Disponible para luz exterior o ventilador</span>");
-  client.println("</div>");
-  
-  client.println("<div class='channel'>");
-  client.println("<strong>🔌 Canal 3:</strong> <span class='available'>⚪ Disponible para bomba de agua o motor</span>");
-  client.println("</div>");
-  
-  client.println("<div class='channel'>");
-  client.println("<strong>🔌 Canal 4:</strong> <span class='available'>⚪ Disponible para sistema de riego</span>");
-  client.println("</div>");
-  client.println("</div>");
-  
-  // Información del sistema
-  client.println("<div class='info'>");
-  client.println("<h3>ℹ️ Información del Sistema</h3>");
-  client.println("<div class='system-info'>");
-  
-  client.println("<div class='info-card'>");
-  client.println("<strong>🌐 Dirección IP</strong><br>");
-  client.println(WiFi.localIP().toString());
-  client.println("</div>");
-  
-  client.println("<div class='info-card'>");
-  client.println("<strong>📡 Señal WiFi</strong><br>");
-  client.print(WiFi.RSSI());
-  client.println(" dBm");
-  client.println("</div>");
-  
-  client.println("<div class='info-card'>");
-  client.println("<strong>⏱️ Tiempo activo</strong><br>");
-  client.print(millis() / 1000);
-  client.println(" seg");
-  client.println("</div>");
-  
-  client.println("<div class='info-card'>");
-  client.println("<strong>🔧 Hardware</strong><br>");
-  client.println("Arduino R4 WiFi");
-  client.println("</div>");
-  
-  client.println("</div>");
-  
-  client.println("<p style='margin-top:20px;color:#666;text-align:center'>");
-  client.println("<strong>Control disponible:</strong> Botón físico (Pin D2) + Interfaz web WiFi<br>");
-  client.println("<strong>Visualización:</strong> Matriz LED 12x8 integrada + LEDs del módulo relé");
-  client.println("</p>");
-  client.println("</div>");
-  
-  // Comandos API
-  client.println("<div class='info'>");
-  client.println("<h3>🔧 API de Control</h3>");
-  client.println("<p><strong>Comandos disponibles:</strong></p>");
-  client.println("<code style='background:#f8f9fa;padding:10px;border-radius:5px;display:block;margin:10px 0'>");
-  client.println("GET /encender - Encender foco<br>");
-  client.println("GET /apagar - Apagar foco<br>");
-  client.println("GET /toggle - Alternar estado<br>");
-  client.println("GET /estado - Consultar estado");
-  client.println("</code>");
-  client.println("</div>");
-  
-  client.println("</div>");
-  
-  // Auto-refresh cada 10 segundos
-  client.println("<script>");
-  client.println("let autoRefresh = setInterval(() => {");
-  client.println("  fetch('/estado').then(() => window.location.reload());");
-  client.println("}, 10000);");
-  client.println("document.addEventListener('visibilitychange', () => {");
-  client.println("  if (document.visibilityState === 'hidden') clearInterval(autoRefresh);");
-  client.println("  else autoRefresh = setInterval(() => window.location.reload(), 10000);");
-  client.println("});");
-  client.println("</script>");
-  
-  client.println("</body>");
-  client.println("</html>");
+  client.println("{\"status\":\"ok\",\"command\":\"" + command + "\"}");
 }
 
-void toggleFoco() {
-  if (estadoFoco) {
-    apagarFoco();
+void handleApiStatusRequest(WiFiClient& client) {
+  String response = generateStatusJson();
+  client.println("HTTP/1.1 200 OK");
+  client.println("Content-Type: application/json");
+  client.println("Connection: close");
+  client.println();
+  client.println(response);
+}
+
+void handleApiModulesRequest(WiFiClient& client) {
+  String response = generateModulesJson();
+  client.println("HTTP/1.1 200 OK");
+  client.println("Content-Type: application/json");
+  client.println("Connection: close");
+  client.println();
+  client.println(response);
+}
+
+void handleModuleRegistration(WiFiClient& client, String request) {
+  // Extraer ID del módulo de la URL
+  int idStart = request.indexOf("id=") + 3;
+  int idEnd = request.indexOf(" ", idStart);
+  if (idEnd == -1) idEnd = request.indexOf("&", idStart);
+  if (idEnd == -1) idEnd = request.length();
+  
+  int moduleId = request.substring(idStart, idEnd).toInt();
+  
+  if (moduleId >= 1 && moduleId <= MAX_MODULES) {
+    int index = moduleId - 1;
+    modules[index].ip = client.remoteIP();
+    modules[index].isOnline = true;
+    modules[index].lastHeartbeat = millis();
+    modules[index].status = "online";
+    
+    // Incrementar contador si es un módulo nuevo
+    bool isNewModule = true;
+    for (int i = 0; i < registeredModules; i++) {
+      if (modules[i].id == moduleId && modules[i].ip == client.remoteIP()) {
+        isNewModule = false;
+        break;
+      }
+    }
+    
+    if (isNewModule && registeredModules < MAX_MODULES) {
+      registeredModules++;
+    }
+    
+    Serial.println("Módulo " + String(moduleId) + " registrado desde IP: " + client.remoteIP().toString());
+    
+    // Respuesta de éxito
+    client.println("HTTP/1.1 200 OK");
+    client.println("Content-Type: application/json");
+    client.println("Connection: close");
+    client.println();
+    client.println("{\"status\":\"registered\",\"id\":" + String(moduleId) + "}");
   } else {
-    encenderFoco();
+    // ID inválido
+    client.println("HTTP/1.1 400 Bad Request");
+    client.println("Connection: close");
+    client.println();
+    client.println("{\"error\":\"Invalid module ID\"}");
   }
 }
 
-void actualizarMatrizLED() {
-  if (estadoFoco) {
-    // matrix.loadFrame(iconoFocoON);
+void handleHeartbeat(WiFiClient& client, String request) {
+  // Extraer ID del módulo
+  int idStart = request.indexOf("id=") + 3;
+  int idEnd = request.indexOf(" ", idStart);
+  if (idEnd == -1) idEnd = request.indexOf("&", idStart);
+  if (idEnd == -1) idEnd = request.length();
+  
+  int moduleId = request.substring(idStart, idEnd).toInt();
+  
+  if (moduleId >= 1 && moduleId <= MAX_MODULES) {
+    int index = moduleId - 1;
+    modules[index].lastHeartbeat = millis();
+    modules[index].isOnline = true;
+    
+    client.println("HTTP/1.1 200 OK");
+    client.println("Content-Type: application/json");
+    client.println("Connection: close");
+    client.println();
+    client.println("{\"status\":\"ok\"}");
   } else {
-    // matrix.loadFrame(iconoFocoOFF);
+    client.println("HTTP/1.1 400 Bad Request");
+    client.println("Connection: close");
+    client.println();
+    client.println("{\"error\":\"Invalid module ID\"}");
   }
 }
 
-void mostrarIconoWiFi() {
-  matrix.loadFrame(iconoWiFi);
-  delay(1000);
+// =============================================================================
+// SERVIDOR WEB Y API
+// =============================================================================
+
+void handleWebClients() {
+  WiFiClient client = server.available();
+  if (client) {
+    String request = client.readStringUntil('\r');
+    client.flush();
+    
+    // Procesar comandos de la interfaz web
+    if (request.indexOf("/api/toggle") != -1) {
+      handleToggleRequest(client, request);
+      return;
+    }
+    else if (request.indexOf("/api/command") != -1) {
+      handleCommandRequest(client, request);
+      return;
+    }
+    else if (request.indexOf("/api/status") != -1) {
+      handleApiStatusRequest(client);
+      return;
+    }
+    else if (request.indexOf("/api/modules") != -1) {
+      handleApiModulesRequest(client);
+      return;
+    }
+    
+    // Generar respuesta HTML para la página principal
+    String html = generateWebInterface();
+    
+    client.println("HTTP/1.1 200 OK");
+    client.println("Content-Type: text/html; charset=UTF-8");
+    client.println("Connection: close");
+    client.println();
+    client.println(html);
+    
+    client.stop();
+  }
 }
 
-// Función para mostrar información de sistema en Serial
-void mostrarInfoSistema() {
-  Serial.println("=== INFORMACIÓN DEL SISTEMA ===");
-  Serial.print("WiFi IP: ");
-  Serial.println(WiFi.localIP());
-  Serial.print("Señal WiFi: ");
-  Serial.print(WiFi.RSSI());
-  Serial.println(" dBm");
-  Serial.print("Estado Foco: ");
-  Serial.println(estadoFoco ? "ENCENDIDO" : "APAGADO");
-  Serial.print("Uptime: ");
-  Serial.print(millis() / 1000);
-  Serial.println(" segundos");
-  Serial.println("===============================");
+void handleApiClients() {
+  WiFiClient client = apiServer.available();
+  if (client) {
+    String request = client.readStringUntil('\r');
+    client.flush();
+    
+    // Procesar registro de módulo
+    if (request.indexOf("/register") != -1) {
+      handleModuleRegistration(client, request);
+    }
+    // Procesar heartbeat
+    else if (request.indexOf("/heartbeat") != -1) {
+      handleHeartbeat(client, request);
+    }
+    
+    client.stop();
+  }
+}
+
+void handleModuleRegistration(WiFiClient& client, String request) {
+  // Extraer ID del módulo de la URL
+  int idStart = request.indexOf("id=") + 3;
+  int idEnd = request.indexOf(" ", idStart);
+  if (idEnd == -1) idEnd = request.indexOf("&", idStart);
+  if (idEnd == -1) idEnd = request.length();
+  
+  int moduleId = request.substring(idStart, idEnd).toInt();
+  
+  if (moduleId >= 1 && moduleId <= MAX_MODULES) {
+    int index = moduleId - 1;
+    modules[index].ip = client.remoteIP();
+    modules[index].isOnline = true;
+    modules[index].lastHeartbeat = millis();
+    modules[index].status = "online";
+    
+    // Incrementar contador si es un módulo nuevo
+    bool isNewModule = true;
+    for (int i = 0; i < registeredModules; i++) {
+      if (modules[i].id == moduleId && modules[i].ip == client.remoteIP()) {
+        isNewModule = false;
+        break;
+      }
+    }
+    
+    if (isNewModule && registeredModules < MAX_MODULES) {
+      registeredModules++;
+    }
+    
+    Serial.println("Módulo " + String(moduleId) + " registrado desde IP: " + client.remoteIP().toString());
+    
+    // Respuesta de éxito
+    client.println("HTTP/1.1 200 OK");
+    client.println("Content-Type: application/json");
+    client.println("Connection: close");
+    client.println();
+    client.println("{\"status\":\"registered\",\"id\":" + String(moduleId) + "}");
+  } else {
+    // ID inválido
+    client.println("HTTP/1.1 400 Bad Request");
+    client.println("Connection: close");
+    client.println();
+    client.println("{\"error\":\"Invalid module ID\"}");
+  }
+}
+
+void handleHeartbeat(WiFiClient& client, String request) {
+  // Extraer ID del módulo
+  int idStart = request.indexOf("id=") + 3;
+  int idEnd = request.indexOf(" ", idStart);
+  if (idEnd == -1) idEnd = request.indexOf("&", idStart);
+  if (idEnd == -1) idEnd = request.length();
+  
+  int moduleId = request.substring(idStart, idEnd).toInt();
+  
+  if (moduleId >= 1 && moduleId <= MAX_MODULES) {
+    int index = moduleId - 1;
+    modules[index].lastHeartbeat = millis();
+    modules[index].isOnline = true;
+    
+    client.println("HTTP/1.1 200 OK");
+    client.println("Content-Type: application/json");
+    client.println("Connection: close");
+    client.println();
+    client.println("{\"status\":\"ok\"}");
+  }
+}
+
+void handleApiRequest(WiFiClient& client, String request) {
+  String response = "{\"error\":\"Unknown API endpoint\"}";
+  String statusCode = "404 Not Found";
+  
+  if (request.indexOf("/api/status") != -1) {
+    response = generateStatusJson();
+    statusCode = "200 OK";
+  }
+  else if (request.indexOf("/api/modules") != -1) {
+    response = generateModulesJson();
+    statusCode = "200 OK";
+  }
+  
+  client.println("HTTP/1.1 " + statusCode);
+  client.println("Content-Type: application/json");
+  client.println("Connection: close");
+  client.println();
+  client.println(response);
+}
+
+// =============================================================================
+// GENERACIÓN DE INTERFACES
+// =============================================================================
+
+String generateWebInterface() {
+  String html = "<!DOCTYPE html><html><head>";
+  html += "<title>Control de Tiras LED</title>";
+  html += "<meta name='viewport' content='width=device-width, initial-scale=1'>";
+  html += "<style>";
+  html += "body{font-family:Arial;margin:20px;background:#f0f0f0}";
+  html += ".container{max-width:800px;margin:0 auto;background:white;padding:20px;border-radius:10px;box-shadow:0 2px 10px rgba(0,0,0,0.1)}";
+  html += ".module{display:inline-block;width:80px;height:80px;margin:10px;text-align:center;border-radius:10px;cursor:pointer;transition:all 0.3s}";
+  html += ".module.online{background:#4CAF50;color:white}";
+  html += ".module.offline{background:#f44336;color:white}";
+  html += ".module.on{box-shadow:0 0 20px #4CAF50}";
+  html += ".controls{margin:20px 0}";
+  html += "button{background:#2196F3;color:white;border:none;padding:10px 20px;margin:5px;border-radius:5px;cursor:pointer}";
+  html += "button:hover{background:#1976D2}";
+  html += ".status{background:#e7f3ff;padding:15px;border-radius:5px;margin:20px 0}";
+  html += "</style></head><body>";
+  
+  html += "<div class='container'>";
+  html += "<h1>🌈 Sistema de Control LED</h1>";
+  
+  // Estado del sistema
+  html += "<div class='status'>";
+  html += "<h3>Estado del Sistema</h3>";
+  html += "<p><strong>Módulos Online:</strong> " + String(getOnlineModulesCount()) + "/" + String(MAX_MODULES) + "</p>";
+  html += "<p><strong>Efecto Actual:</strong> " + currentEffect + "</p>";
+  html += "<p><strong>Modo Automático:</strong> " + String(autoMode ? "Activado" : "Desactivado") + "</p>";
+  html += "</div>";
+  
+  // Módulos individuales
+  html += "<h3>Control Individual</h3>";
+  html += "<div class='modules'>";
+  for (int i = 0; i < MAX_MODULES; i++) {
+    String moduleClass = "module ";
+    moduleClass += modules[i].isOnline ? "online" : "offline";
+    if (modules[i].isOn) moduleClass += " on";
+    
+    html += "<div class='" + moduleClass + "' onclick='toggleModule(" + String(i+1) + ")'>";
+    html += "<div>" + String(i+1) + "</div>";
+    String statusText = modules[i].isOnline ? "ON" : "OFF";
+    html += "<div style='font-size:12px'>" + statusText + "</div>";
+    html += "</div>";
+  }
+  html += "</div>";
+  
+  // Controles globales
+  html += "<div class='controls'>";
+  html += "<h3>Controles Globales</h3>";
+  html += "<button onclick='sendCommand(\"all_on\")'>🔆 Todas ON</button>";
+  html += "<button onclick='sendCommand(\"all_off\")'>🔅 Todas OFF</button>";
+  html += "<br>";
+  html += "<button onclick='sendCommand(\"wave\")'>🌊 Onda</button>";
+  html += "<button onclick='sendCommand(\"chase\")'>🏃 Persecución</button>";
+  html += "<button onclick='sendCommand(\"blink\")'>⚡ Parpadeo</button>";
+  html += "<button onclick='sendCommand(\"random\")'>🎲 Aleatorio</button>";
+  html += "<br>";
+  html += "<button onclick='sendCommand(\"auto_on\")'>🤖 Auto ON</button>";
+  html += "<button onclick='sendCommand(\"auto_off\")'>⏹️ Auto OFF</button>";
+  html += "</div>";
+  
+  html += "</div>";
+  
+  // JavaScript
+  html += "<script>";
+  html += "function toggleModule(id){";
+  html += "  fetch('/api/toggle?id='+id).then(()=>location.reload());";
+  html += "}";
+  html += "function sendCommand(cmd){";
+  html += "  fetch('/api/command?cmd='+cmd).then(()=>location.reload());";
+  html += "}";
+  html += "setTimeout(()=>location.reload(), 5000);"; // Auto-refresh cada 5 segundos
+  html += "</script>";
+  
+  html += "</body></html>";
+  
+  return html;
+}
+
+String generateStatusJson() {
+  String json = "{";
+  json += "\"systemStatus\":\"" + String(effectRunning ? "running" : "idle") + "\",";
+  json += "\"currentEffect\":\"" + currentEffect + "\",";
+  json += "\"autoMode\":" + String(autoMode ? "true" : "false") + ",";
+  json += "\"onlineModules\":" + String(getOnlineModulesCount()) + ",";
+  json += "\"totalModules\":" + String(MAX_MODULES) + ",";
+  json += "\"uptime\":" + String(millis()) + "";
+  json += "}";
+  return json;
+}
+
+String generateModulesJson() {
+  String json = "{\"modules\":[";
+  for (int i = 0; i < MAX_MODULES; i++) {
+    if (i > 0) json += ",";
+    json += "{";
+    json += "\"id\":" + String(modules[i].id) + ",";
+    json += "\"ip\":\"" + modules[i].ip.toString() + "\",";
+    json += "\"online\":" + String(modules[i].isOnline ? "true" : "false") + ",";
+    json += "\"state\":" + String(modules[i].isOn ? "true" : "false") + ",";
+    json += "\"lastHeartbeat\":" + String(modules[i].lastHeartbeat) + "";
+    json += "}";
+  }
+  json += "]}";
+  return json;
+}
+
+void handleToggleRequest(WiFiClient& client, String request) {
+  // Extraer ID del módulo
+  int idStart = request.indexOf("id=") + 3;
+  int idEnd = request.indexOf(" ", idStart);
+  if (idEnd == -1) idEnd = request.indexOf("&", idStart);
+  if (idEnd == -1) idEnd = request.length();
+  
+  int moduleId = request.substring(idStart, idEnd).toInt();
+  
+  if (moduleId >= 1 && moduleId <= MAX_MODULES) {
+    int index = moduleId - 1;
+    bool newState = !modules[index].isOn;
+    controlModule(moduleId, newState);
+    
+    client.println("HTTP/1.1 200 OK");
+    client.println("Content-Type: application/json");
+    client.println("Connection: close");
+    client.println();
+    client.println("{\"status\":\"ok\",\"module\":" + String(moduleId) + ",\"state\":" + (newState ? "true" : "false") + "}");
+  } else {
+    client.println("HTTP/1.1 400 Bad Request");
+    client.println("Connection: close");
+    client.println();
+    client.println("{\"error\":\"Invalid module ID\"}");
+  }
+}
+
+void handleCommandRequest(WiFiClient& client, String request) {
+  // Extraer comando
+  int cmdStart = request.indexOf("cmd=") + 4;
+  int cmdEnd = request.indexOf(" ", cmdStart);
+  if (cmdEnd == -1) cmdEnd = request.indexOf("&", cmdStart);
+  if (cmdEnd == -1) cmdEnd = request.length();
+  
+  String command = request.substring(cmdStart, cmdEnd);
+  command.toLowerCase();
+  
+  // Procesar comando
+  processCommand(command);
+  
+  client.println("HTTP/1.1 200 OK");
+  client.println("Content-Type: application/json");
+  client.println("Connection: close");
+  client.println();
+  client.println("{\"status\":\"ok\",\"command\":\"" + command + "\"}");
+}
+
+// =============================================================================
+// FUNCIONES AUXILIARES
+// =============================================================================
+
+void checkModulesHeartbeat() {
+  unsigned long currentTime = millis();
+  
+  if (currentTime - lastHeartbeatCheck < 10000) return; // Verificar cada 10 segundos
+  lastHeartbeatCheck = currentTime;
+  
+  for (int i = 0; i < MAX_MODULES; i++) {
+    if (modules[i].isOnline) {
+      if (currentTime - modules[i].lastHeartbeat > MODULE_TIMEOUT) {
+        modules[i].isOnline = false;
+        modules[i].status = "timeout";
+        Serial.println("Módulo " + String(i+1) + " desconectado (timeout)");
+      }
+    }
+  }
+}
+
+int getOnlineModulesCount() {
+  int count = 0;
+  for (int i = 0; i < MAX_MODULES; i++) {
+    if (modules[i].isOnline) count++;
+  }
+  return count;
+}
+
+void printSystemStatus() {
+  Serial.println("\n=== ESTADO DEL SISTEMA ===");
+  Serial.println("Punto de Acceso: " + String(ssid));
+  Serial.println("IP: " + WiFi.localIP().toString());
+  Serial.println("Módulos online: " + String(getOnlineModulesCount()) + "/" + String(MAX_MODULES));
+  Serial.println("Efecto actual: " + currentEffect);
+  Serial.println("Modo automático: " + String(autoMode ? "ON" : "OFF"));
+  Serial.println("Uptime: " + String(millis()/1000) + " segundos");
+  Serial.println("=========================\n");
+}
+
+void printModulesStatus() {
+  Serial.println("\n=== ESTADO DE MÓDULOS ===");
+  for (int i = 0; i < MAX_MODULES; i++) {
+    Serial.print("Módulo " + String(i+1) + ": ");
+    if (modules[i].isOnline) {
+      Serial.print("ONLINE (" + modules[i].ip.toString() + ") ");
+      Serial.print(modules[i].isOn ? "ON" : "OFF");
+      Serial.println(" - Último heartbeat: " + String((millis() - modules[i].lastHeartbeat)/1000) + "s");
+    } else {
+      Serial.println("OFFLINE");
+    }
+  }
+  Serial.println("========================\n");
+}
+
+void printSystemInfo() {
+  Serial.println("\n=== INFORMACIÓN DEL SISTEMA ===");
+  Serial.println("SSID: " + String(ssid));
+  Serial.println("Password: " + String(password));
+  Serial.println("IP Gateway: " + WiFi.localIP().toString());
+  Serial.println("Puerto Web: 80");
+  Serial.println("Puerto API: 8080");
+  Serial.println("Máximo módulos: " + String(MAX_MODULES));
+  Serial.println("==============================\n");
+}
+
+void printCommands() {
+  Serial.println("\n=== COMANDOS DISPONIBLES ===");
+  Serial.println("on [1-12]     - Encender tira específica");
+  Serial.println("off [1-12]    - Apagar tira específica");
+  Serial.println("all_on        - Encender todas las tiras");
+  Serial.println("all_off       - Apagar todas las tiras");
+  Serial.println("wave          - Efecto onda secuencial");
+  Serial.println("chase         - Efecto persecución");
+  Serial.println("blink         - Efecto parpadeo");
+  Serial.println("random        - Efecto aleatorio");
+  Serial.println("auto_on       - Activar modo automático");
+  Serial.println("auto_off      - Desactivar modo automático");
+  Serial.println("speed [ms]    - Ajustar velocidad efecto");
+  Serial.println("status        - Estado del sistema");
+  Serial.println("modules       - Estado de módulos");
+  Serial.println("reset         - Reiniciar sistema");
+  Serial.println("help          - Mostrar esta ayuda");
+  Serial.println("============================\n");
+}
+
+void resetSystem() {
+  Serial.println("Reiniciando sistema...");
+  initializeModules();
+  stopEffect();
+  autoMode = false;
+  Serial.println("Sistema reiniciado");
 }
