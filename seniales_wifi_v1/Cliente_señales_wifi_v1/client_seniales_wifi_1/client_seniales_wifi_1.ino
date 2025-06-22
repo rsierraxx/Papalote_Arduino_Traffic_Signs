@@ -1,22 +1,28 @@
 /*
  * Sistema de Control de Tiras LED - ESP8266-01S (Módulo Cliente)
  * Autor: Sistema LED Control
- * Versión: 2.1 - Final
+ * Versión: 3.0 - Con apagado automático
  * 
  * IMPORTANTE: Cambiar MODULE_ID para cada módulo (1-12)
+ * 
+ * Cambios en v3.0:
+ * - Cambiado a GPIO2 para el relevador (más estable que GPIO0)
+ * - Agregado apagado automático después de 3 segundos
+ * - El módulo se apaga solo sin necesidad de señal del maestro
  * 
  * Funcionalidades:
  * - Conexión automática al Arduino UNO R4 WiFi
  * - Auto-registro con ID único
  * - Control de relevador para tira LED 24V
+ * - Apagado automático después de 3 segundos
  * - Servidor HTTP integrado
  * - Sistema de heartbeat automático
  * - Reconexión automática
  * - Interfaz web individual
  * 
  * Conexiones:
- * GPIO0 → Control relevador
- * GPIO2 → LED indicador estado (opcional)
+ * GPIO2 → Control relevador (CAMBIADO!)
+ * GPIO3 → LED indicador estado (RX - opcional)
  * VCC → 3.3V | GND → Tierra
  */
 
@@ -43,14 +49,20 @@ const int masterPort = 8080;
 // CONFIGURACIÓN DE HARDWARE
 // =============================================================================
 
-#define RELAY_PIN 0      // GPIO0 - Control del relevador
-#define STATUS_LED_PIN 2 // GPIO2 - LED indicador
+// IMPORTANTE: Cambiado de GPIO0 a GPIO2 para evitar problemas de boot
+#define RELAY_PIN 2      // GPIO2 - Control del relevador (CAMBIADO!)
+// Si no necesitas Serial, puedes usar GPIO3 para LED
+// #define STATUS_LED_PIN 3 // GPIO3 (RX) - LED indicador
+
+// Usando el LED integrado en GPIO2 (compartido con relay)
+#define USE_BUILTIN_LED true
 
 // =============================================================================
 // CONFIGURACIÓN DE TIEMPOS
 // =============================================================================
 
-#define HEARTBEAT_INTERVAL 60000    // 60 segundos
+#define AUTO_OFF_DELAY 3000         // 3 segundos para apagado automático
+#define HEARTBEAT_INTERVAL 45000    // 45 segundos
 #define RECONNECT_DELAY 5000        // 5 segundos
 #define REGISTRATION_RETRY 10000    // 10 segundos
 #define HTTP_TIMEOUT 5000           // 5 segundos
@@ -72,11 +84,16 @@ unsigned long lastReconnect = 0;
 unsigned long lastRegistration = 0;
 unsigned long bootTime = 0;
 
+// Variables para apagado automático
+bool autoOffActive = false;
+unsigned long turnOnTime = 0;
+
 // Estadísticas
 int totalCommands = 0;
 int failedCommands = 0;
 int heartbeatCount = 0;
 int reconnectCount = 0;
+int autoOffCount = 0;
 
 // =============================================================================
 // SETUP - CONFIGURACIÓN INICIAL
@@ -90,13 +107,13 @@ void setup() {
   
   Serial.println();
   Serial.println("========================================");
-  Serial.println("    MODULO LED ESP8266-01S");
+  Serial.println("    MODULO LED ESP8266-01S v3.0");
   Serial.println("========================================");
   Serial.println("ID: " + String(MODULE_ID));
-  Serial.println("Version: 2.1");
+  Serial.println("Version: 3.0 - Auto-off 3 segundos");
   Serial.println("Inicializando...");
   
-  // Configurar pines
+  // Configurar pines ANTES de cualquier otra cosa
   initializePins();
   
   // Mostrar información del chip
@@ -115,6 +132,7 @@ void setup() {
   Serial.println("MODULO LISTO - ID: " + String(MODULE_ID));
   Serial.println("IP: " + WiFi.localIP().toString());
   Serial.println("Estado: " + String(isRegistered ? "Registrado" : "Pendiente"));
+  Serial.println("Auto-off: ACTIVADO (3 segundos)");
   Serial.println("========================================");
 }
 
@@ -125,6 +143,9 @@ void setup() {
 void loop() {
   // Manejar servidor web
   server.handleClient();
+  
+  // Verificar apagado automático
+  handleAutoOff();
   
   // Verificar estado WiFi
   if (WiFi.status() != WL_CONNECTED) {
@@ -143,11 +164,33 @@ void loop() {
     }
   }
   
-  // Actualizar LED de estado
-  updateStatusLED();
-  
   // Pausa mínima
   delay(10);
+}
+
+// =============================================================================
+// CONTROL DE APAGADO AUTOMÁTICO
+// =============================================================================
+
+void handleAutoOff() {
+  // Si el apagado automático está activo y el relay está encendido
+  if (autoOffActive && relayState) {
+    unsigned long currentTime = millis();
+    unsigned long elapsedTime = currentTime - turnOnTime;
+    
+    // Verificar si han pasado 3 segundos
+    if (elapsedTime >= AUTO_OFF_DELAY) {
+      // Apagar el relevador
+      setRelayState(false, false);  // false = no activar timer
+      
+      // Desactivar el temporizador
+      autoOffActive = false;
+      autoOffCount++;
+      
+      Serial.println("⏰ APAGADO AUTOMÁTICO ejecutado (3 segundos cumplidos)");
+      Serial.println("   Total apagados automáticos: " + String(autoOffCount));
+    }
+  }
 }
 
 // =============================================================================
@@ -155,17 +198,29 @@ void loop() {
 // =============================================================================
 
 void initializePins() {
-  pinMode(RELAY_PIN, OUTPUT);
-  pinMode(STATUS_LED_PIN, OUTPUT);
+  Serial.println("--- CONFIGURANDO PINES ---");
   
-  // Estado inicial apagado
-  digitalWrite(RELAY_PIN, LOW);
-  digitalWrite(STATUS_LED_PIN, LOW);
+  // IMPORTANTE: Establecer estado ANTES de configurar como OUTPUT
+  digitalWrite(RELAY_PIN, LOW);  // Asegurar que empiece apagado
+  delay(100);
+  
+  pinMode(RELAY_PIN, OUTPUT);
+  digitalWrite(RELAY_PIN, LOW);  // Asegurar nuevamente
+  
   relayState = false;
   
   Serial.println("✓ Pines configurados");
-  Serial.println("  GPIO0 (Relevador): OUTPUT");
-  Serial.println("  GPIO2 (LED Estado): OUTPUT");
+  Serial.println("  GPIO2 (Relevador): OUTPUT - INICIALIZADO EN LOW");
+  Serial.println("  NOTA: GPIO2 es más estable que GPIO0 para relays");
+  
+  // Parpadeo inicial para confirmar que funciona
+  for (int i = 0; i < 3; i++) {
+    digitalWrite(RELAY_PIN, HIGH);
+    delay(100);
+    digitalWrite(RELAY_PIN, LOW);
+    delay(100);
+  }
+  Serial.println("✓ Test de relay completado");
 }
 
 void printChipInfo() {
@@ -175,6 +230,11 @@ void printChipInfo() {
   Serial.println("Free Heap: " + String(ESP.getFreeHeap()) + " bytes");
   Serial.println("CPU Freq: " + String(ESP.getCpuFreqMHz()) + " MHz");
   Serial.println("MAC: " + WiFi.macAddress());
+  
+  // Detectar causa del reinicio
+  rst_info *resetInfo = ESP.getResetInfoPtr();
+  Serial.print("Reset reason: ");
+  Serial.println(resetInfo->reason);
 }
 
 // =============================================================================
@@ -186,15 +246,14 @@ void connectWiFi() {
   Serial.println("SSID: " + String(ssid));
   
   WiFi.mode(WIFI_STA);
+  WiFi.setAutoReconnect(true);
+  WiFi.persistent(true);
   WiFi.begin(ssid, password);
   
   int attempts = 0;
   while (WiFi.status() != WL_CONNECTED && attempts < 30) {
     delay(500);
     Serial.print(".");
-    
-    // Parpadeo durante conexión
-    digitalWrite(STATUS_LED_PIN, !digitalRead(STATUS_LED_PIN));
     attempts++;
   }
   
@@ -205,13 +264,10 @@ void connectWiFi() {
     Serial.println("  IP: " + WiFi.localIP().toString());
     Serial.println("  RSSI: " + String(WiFi.RSSI()) + " dBm");
     Serial.println("  Gateway: " + WiFi.gatewayIP().toString());
-    
-    digitalWrite(STATUS_LED_PIN, HIGH);
   } else {
     wifiConnected = false;
     Serial.println();
     Serial.println("✗ Error conectando WiFi");
-    digitalWrite(STATUS_LED_PIN, LOW);
   }
 }
 
@@ -264,6 +320,7 @@ void setupWebServer() {
   // Utilidades
   server.on("/reset", HTTP_GET, handleReset);
   server.on("/test", HTTP_GET, handleTest);
+  server.on("/cancel_timer", HTTP_GET, handleCancelTimer);
   
   // 404 handler
   server.onNotFound(handleNotFound);
@@ -283,24 +340,42 @@ void handleRoot() {
 }
 
 void handleOn() {
-  setRelayState(true);
+  Serial.println("📥 Comando ON recibido");
+  setRelayState(true, true);  // true = activar timer
+  
   String response = createJsonResponse("on", true);
   server.send(200, "application/json", response);
-  Serial.println("🔆 Comando ON - IP: " + server.client().remoteIP().toString());
 }
 
 void handleOff() {
-  setRelayState(false);
+  Serial.println("📥 Comando OFF recibido");
+  setRelayState(false, false);  // false = no activar timer
+  
+  // Cancelar temporizador si estaba activo
+  if (autoOffActive) {
+    autoOffActive = false;
+    Serial.println("⏹️ Timer de apagado cancelado");
+  }
+  
   String response = createJsonResponse("off", false);
   server.send(200, "application/json", response);
-  Serial.println("🔅 Comando OFF - IP: " + server.client().remoteIP().toString());
 }
 
 void handleToggle() {
-  setRelayState(!relayState);
+  bool newState = !relayState;
+  setRelayState(newState, newState);  // activar timer solo si se enciende
   String response = createJsonResponse("toggle", relayState);
   server.send(200, "application/json", response);
   Serial.println("🔄 Comando TOGGLE - Estado: " + String(relayState ? "ON" : "OFF"));
+}
+
+void handleCancelTimer() {
+  if (autoOffActive) {
+    autoOffActive = false;
+    Serial.println("⏹️ Timer de apagado cancelado manualmente");
+  }
+  String response = createJsonResponse("cancel_timer", relayState);
+  server.send(200, "application/json", response);
 }
 
 void handleBlinkFast() {
@@ -330,13 +405,18 @@ void handleInfo() {
 void handleTest() {
   Serial.println("🧪 Test ejecutado desde: " + server.client().remoteIP().toString());
   
-  // Secuencia de test
+  // Secuencia de test sin timer
+  bool timerWasActive = autoOffActive;
+  autoOffActive = false;
+  
   for (int i = 0; i < 3; i++) {
-    setRelayState(true);
+    digitalWrite(RELAY_PIN, HIGH);
     delay(300);
-    setRelayState(false);
+    digitalWrite(RELAY_PIN, LOW);
     delay(300);
   }
+  
+  autoOffActive = timerWasActive;
   
   String response = createJsonResponse("test", false);
   server.send(200, "application/json", response);
@@ -360,19 +440,34 @@ void handleNotFound() {
 // CONTROL DEL RELEVADOR
 // =============================================================================
 
-void setRelayState(bool state) {
+void setRelayState(bool state, bool activateTimer) {
+  // Evitar cambios redundantes
+  if (relayState == state && !activateTimer) {
+    return;
+  }
+  
   relayState = state;
   digitalWrite(RELAY_PIN, state ? HIGH : LOW);
   totalCommands++;
   
   Serial.println("🔌 Relevador " + String(state ? "ACTIVADO" : "DESACTIVADO"));
   
-  // Confirmación visual
-  blinkStatusLED(2, 100);
+  // Manejar temporizador de apagado automático
+  if (state && activateTimer) {
+    autoOffActive = true;
+    turnOnTime = millis();
+    Serial.println("⏰ Timer de apagado activado (3 segundos)");
+  } else if (!state) {
+    autoOffActive = false;
+  }
 }
 
 void executeBlinkPattern(int cycles, int delayMs) {
   bool originalState = relayState;
+  bool timerWasActive = autoOffActive;
+  
+  // Desactivar timer temporalmente
+  autoOffActive = false;
   
   Serial.println("⚡ Ejecutando " + String(cycles) + " parpadeos (" + String(delayMs) + "ms)");
   
@@ -385,16 +480,14 @@ void executeBlinkPattern(int cycles, int delayMs) {
   
   // Restaurar estado original
   digitalWrite(RELAY_PIN, originalState ? HIGH : LOW);
-  Serial.println("✓ Patrón completado, estado restaurado");
-}
-
-void blinkStatusLED(int times, int delayMs) {
-  for (int i = 0; i < times; i++) {
-    digitalWrite(STATUS_LED_PIN, LOW);
-    delay(delayMs);
-    digitalWrite(STATUS_LED_PIN, HIGH);
-    delay(delayMs);
+  relayState = originalState;
+  
+  // Restaurar timer si estaba activo
+  if (timerWasActive && originalState) {
+    autoOffActive = true;
   }
+  
+  Serial.println("✓ Patrón completado, estado restaurado");
 }
 
 // =============================================================================
@@ -450,6 +543,8 @@ void sendHeartbeat() {
   url += "&uptime=" + String(millis() - bootTime);
   url += "&rssi=" + String(WiFi.RSSI());
   url += "&heap=" + String(ESP.getFreeHeap());
+  url += "&autooff=" + String(autoOffActive ? "1" : "0");
+  url += "&autooffcount=" + String(autoOffCount);
   
   httpClient.begin(wifiClient, url);
   httpClient.setTimeout(HTTP_TIMEOUT);
@@ -485,6 +580,13 @@ String createJsonResponse(String command, bool state) {
   json += "\"module_id\":" + String(MODULE_ID) + ",";
   json += "\"command\":\"" + command + "\",";
   json += "\"relay_state\":" + String(state ? "true" : "false") + ",";
+  json += "\"auto_off_active\":" + String(autoOffActive ? "true" : "false") + ",";
+  
+  if (autoOffActive) {
+    unsigned long timeLeft = AUTO_OFF_DELAY - (millis() - turnOnTime);
+    json += "\"auto_off_remaining\":" + String(timeLeft) + ",";
+  }
+  
   json += "\"timestamp\":" + String(millis()) + "";
   json += "}";
   return json;
@@ -494,6 +596,14 @@ String generateStatusJson() {
   String json = "{";
   json += "\"module_id\":" + String(MODULE_ID) + ",";
   json += "\"relay_state\":" + String(relayState ? "true" : "false") + ",";
+  json += "\"auto_off_active\":" + String(autoOffActive ? "true" : "false") + ",";
+  
+  if (autoOffActive) {
+    unsigned long timeLeft = AUTO_OFF_DELAY - (millis() - turnOnTime);
+    json += "\"auto_off_remaining\":" + String(timeLeft) + ",";
+  }
+  
+  json += "\"auto_off_count\":" + String(autoOffCount) + ",";
   json += "\"wifi_connected\":" + String(wifiConnected ? "true" : "false") + ",";
   json += "\"registered\":" + String(isRegistered ? "true" : "false") + ",";
   json += "\"uptime\":" + String(millis() - bootTime) + ",";
@@ -512,7 +622,8 @@ String generateInfoJson() {
   String json = "{";
   json += "\"module\":{";
   json += "\"id\":" + String(MODULE_ID) + ",";
-  json += "\"version\":\"2.1\",";
+  json += "\"version\":\"3.0\",";
+  json += "\"features\":[\"auto-off\",\"3-second-timer\",\"gpio2-relay\"],";
   json += "\"hardware\":\"ESP8266-01S\"";
   json += "},";
   json += "\"network\":{";
@@ -527,7 +638,9 @@ String generateInfoJson() {
   json += "\"free_heap\":" + String(ESP.getFreeHeap()) + ",";
   json += "\"chip_id\":\"" + String(ESP.getChipId(), HEX) + "\",";
   json += "\"flash_size\":" + String(ESP.getFlashChipSize()) + ",";
-  json += "\"cpu_freq\":" + String(ESP.getCpuFreqMHz()) + "";
+  json += "\"cpu_freq\":" + String(ESP.getCpuFreqMHz()) + ",";
+  json += "\"auto_off_count\":" + String(autoOffCount) + ",";
+  json += "\"relay_pin\":\"GPIO" + String(RELAY_PIN) + "\"";
   json += "}";
   json += "}";
   return json;
@@ -550,6 +663,9 @@ String generateWebInterface() {
   html += ".status{padding:15px;border-radius:15px;margin:20px 0;text-align:center;font-weight:bold;font-size:1.2em;transition:all 0.3s ease}";
   html += ".status.on{background:linear-gradient(45deg,#4CAF50,#45a049);color:white;box-shadow:0 10px 20px rgba(76,175,80,0.3)}";
   html += ".status.off{background:linear-gradient(45deg,#f44336,#d32f2f);color:white;box-shadow:0 10px 20px rgba(244,67,54,0.3)}";
+  html += ".timer-info{background:#FFF3E0;padding:15px;border-radius:10px;margin:15px 0;text-align:center;border:2px solid #FF9800;display:none}";
+  html += ".timer-info.active{display:block}";
+  html += ".countdown{font-size:2em;font-weight:bold;color:#FF6F00;margin:10px 0}";
   html += ".controls{display:grid;grid-template-columns:1fr 1fr;gap:15px;margin:25px 0}";
   html += ".btn{background:linear-gradient(45deg,#2196F3,#1976D2);color:white;border:none;padding:15px;border-radius:15px;cursor:pointer;font-size:1.1em;font-weight:bold;transition:all 0.3s ease;text-decoration:none;display:block;text-align:center}";
   html += ".btn:hover{transform:translateY(-2px);box-shadow:0 10px 20px rgba(33,150,243,0.3)}";
@@ -561,7 +677,8 @@ String generateWebInterface() {
   html += ".info-item{display:flex;justify-content:space-between;margin:8px 0;padding:5px 0;border-bottom:1px solid rgba(33,150,243,0.2)}";
   html += ".info-label{font-weight:bold;color:#1976D2}";
   html += ".footer{text-align:center;margin-top:30px;color:#666;font-size:0.9em}";
-  html += "@keyframes pulse{0%{box-shadow:0 0 0 0 rgba(33,150,243,0.7)}70%{box-shadow:0 0 0 10px rgba(33,150,243,0)}100%{box-shadow:0 0 0 0 rgba(33,150,243,0)}}";
+  html += ".pulse{animation:pulse 2s infinite}";
+  html += "@keyframes pulse{0%{box-shadow:0 0 0 0 rgba(255,152,0,0.7)}70%{box-shadow:0 0 0 10px rgba(255,152,0,0)}100%{box-shadow:0 0 0 0 rgba(255,152,0,0)}}";
   html += "</style></head><body>";
   
   html += "<div class='container'>";
@@ -569,7 +686,7 @@ String generateWebInterface() {
   // Header
   html += "<div class='header'>";
   html += "<div class='module-id'>🔆 Módulo " + String(MODULE_ID) + "</div>";
-  html += "<div style='color:#666'>Controlador de Tira LED</div>";
+  html += "<div style='color:#666'>Controlador de Tira LED v3.0</div>";
   html += "</div>";
   
   // Estado actual
@@ -578,6 +695,12 @@ String generateWebInterface() {
   String statusIcon = relayState ? "💡" : "🌙";
   html += "<div class='status " + statusClass + "'>";
   html += statusIcon + " " + statusText;
+  html += "</div>";
+  
+  // Información del temporizador
+  html += "<div class='timer-info" + String(autoOffActive ? " active pulse" : "") + "'>";
+  html += "⏰ APAGADO AUTOMÁTICO ACTIVO";
+  html += "<div class='countdown' id='countdown'>3 segundos</div>";
   html += "</div>";
   
   // Controles principales
@@ -592,6 +715,9 @@ String generateWebInterface() {
   html += "<div class='controls'>";
   html += "<button class='btn' onclick='sendCommand(\"/test\")'>🧪 Test</button>";
   html += "<button class='btn' onclick='location.reload()'>🔄 Actualizar</button>";
+  if (autoOffActive) {
+    html += "<button class='btn warning full' onclick='sendCommand(\"/cancel_timer\")'>⏹️ Cancelar Timer</button>";
+  }
   html += "<button class='btn danger full' onclick='confirmReset()'>🔄 Reiniciar Módulo</button>";
   html += "</div>";
   
@@ -603,20 +729,42 @@ String generateWebInterface() {
   html += "<div class='info-item'><span class='info-label'>Uptime:</span><span>" + String((millis() - bootTime)/1000) + " seg</span></div>";
   html += "<div class='info-item'><span class='info-label'>Registrado:</span><span>" + String(isRegistered ? "✅ Sí" : "❌ No") + "</span></div>";
   html += "<div class='info-item'><span class='info-label'>Comandos:</span><span>" + String(totalCommands) + "</span></div>";
+  html += "<div class='info-item'><span class='info-label'>Auto-off:</span><span>" + String(autoOffCount) + " veces</span></div>";
   html += "<div class='info-item'><span class='info-label'>Heartbeats:</span><span>" + String(heartbeatCount) + "</span></div>";
   html += "<div class='info-item'><span class='info-label'>RAM Libre:</span><span>" + String(ESP.getFreeHeap()) + " bytes</span></div>";
+  html += "<div class='info-item'><span class='info-label'>Relay Pin:</span><span>GPIO" + String(RELAY_PIN) + "</span></div>";
   html += "</div>";
   
   // Footer
   html += "<div class='footer'>";
-  html += "Sistema LED Control v2.1<br>";
-  html += "ESP8266-01S • ID: " + String(MODULE_ID);
+  html += "Sistema LED Control v3.0<br>";
+  html += "ESP8266-01S • ID: " + String(MODULE_ID) + "<br>";
+  html += "⏰ Auto-off: 3 segundos<br>";
+  html += "📍 Relay: GPIO2 (estable)";
   html += "</div>";
   
   html += "</div>";
   
   // JavaScript
   html += "<script>";
+  html += "var autoOffActive = " + String(autoOffActive ? "true" : "false") + ";";
+  html += "var turnOnTime = " + String(turnOnTime) + ";";
+  html += "var currentTime = " + String(millis()) + ";";
+  html += "var serverOffset = currentTime - Date.now();";
+  
+  html += "function updateCountdown() {";
+  html += "  if (autoOffActive) {";
+  html += "    var now = Date.now() + serverOffset;";
+  html += "    var elapsed = now - turnOnTime;";
+  html += "    var remaining = Math.max(0, 3000 - elapsed);";
+  html += "    var seconds = Math.ceil(remaining / 1000);";
+  html += "    document.getElementById('countdown').textContent = seconds + ' segundo' + (seconds !== 1 ? 's' : '');";
+  html += "    if (remaining <= 0) {";
+  html += "      setTimeout(() => location.reload(), 500);";
+  html += "    }";
+  html += "  }";
+  html += "}";
+  
   html += "function sendCommand(endpoint){";
   html += "  const btn = event.target;";
   html += "  btn.style.opacity = '0.6';";
@@ -636,45 +784,23 @@ String generateWebInterface() {
   html += "      btn.disabled = false;";
   html += "    });";
   html += "}";
+  
   html += "function confirmReset(){";
   html += "  if(confirm('¿Reiniciar el módulo " + String(MODULE_ID) + "?')){";
   html += "    sendCommand('/reset');";
   html += "    alert('Módulo reiniciando...');";
   html += "  }";
   html += "}";
-  html += "setTimeout(() => location.reload(), 30000);"; // Auto-refresh cada 30 segundos
+  
+  html += "if (autoOffActive) {";
+  html += "  setInterval(updateCountdown, 100);";
+  html += "  updateCountdown();";
+  html += "}";
+  
+  html += "setTimeout(() => location.reload(), 10000);"; // Auto-refresh cada 10 segundos
   html += "</script>";
   
   html += "</body></html>";
   
   return html;
-}
-
-// =============================================================================
-// LED DE ESTADO
-// =============================================================================
-
-void updateStatusLED() {
-  static unsigned long lastBlink = 0;
-  static bool ledState = false;
-  unsigned long currentTime = millis();
-  
-  if (!wifiConnected) {
-    // Sin WiFi: parpadeo rápido (200ms)
-    if (currentTime - lastBlink > 200) {
-      lastBlink = currentTime;
-      ledState = !ledState;
-      digitalWrite(STATUS_LED_PIN, ledState);
-    }
-  } else if (!isRegistered) {
-    // WiFi OK pero sin registro: parpadeo lento (1 segundo)
-    if (currentTime - lastBlink > 1000) {
-      lastBlink = currentTime;
-      ledState = !ledState;
-      digitalWrite(STATUS_LED_PIN, ledState);
-    }
-  } else {
-    // Todo OK: LED encendido fijo
-    digitalWrite(STATUS_LED_PIN, HIGH);
-  }
 }

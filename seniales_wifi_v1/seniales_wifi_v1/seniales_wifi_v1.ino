@@ -1,7 +1,12 @@
 /*
  * Sistema de Control de 12 Tiras LED - Arduino UNO R4 WiFi (Maestro)
  * Autor: Sistema LED Control
- * Versión: 2.2 - Corregido
+ * Versión: 3.0 - Sin apagado automático
+ * 
+ * Cambios en v3.0:
+ * - Eliminado el apagado automático desde el maestro
+ * - Los botones solo envían señal de encendido
+ * - El apagado es manejado por cada módulo cliente (3 segundos)
  * 
  * Funcionalidades:
  * - Punto de acceso WiFi autónomo
@@ -37,8 +42,7 @@ const IPAddress subnet(255, 255, 255, 0);
 #define BUTTON2_PIN 3             // Pin digital 3 para botón 2 (Módulo 2)
 #define BUTTON3_PIN 4             // Pin digital 4 para botón 3 (Módulo 3)
 #define BUTTON_DEBOUNCE 50        // 50ms debounce
-#define AUTO_OFF_DELAY 2000       // 2 segundos para apagado automático
-#define HTTP_TIMEOUT 1000        // 1 segundo timeout para HTTP (más rápido)
+#define HTTP_TIMEOUT 1000         // 1 segundo timeout para HTTP (más rápido)
 
 // Puertos
 WiFiServer server(80);
@@ -78,24 +82,16 @@ struct ButtonState {
   bool currentState;
   unsigned long lastDebounceTime;
   bool pressed;
+  unsigned long lastActivationTime;  // Nueva variable para control de tiempo
+  bool isProcessing;                 // Nueva variable para evitar múltiples envíos
 };
 
-ButtonState button1 = {HIGH, HIGH, 0, false};
-ButtonState button2 = {HIGH, HIGH, 0, false};
-ButtonState button3 = {HIGH, HIGH, 0, false};
+ButtonState button1 = {HIGH, HIGH, 0, false, 0, false};
+ButtonState button2 = {HIGH, HIGH, 0, false, 0, false};
+ButtonState button3 = {HIGH, HIGH, 0, false, 0, false};
 
-// Variables para control temporal de módulos
-struct ModuleTimer {
-  bool autoOffActive;
-  unsigned long turnOnTime;
-  int moduleId;
-};
-
-ModuleTimer moduleTimers[3] = {
-  {false, 0, 1},  // Botón 1 → Módulo 1
-  {false, 0, 2},  // Botón 2 → Módulo 2  
-  {false, 0, 3}   // Botón 3 → Módulo 3
-};
+// Tiempo mínimo entre activaciones (ms)
+#define MIN_ACTIVATION_INTERVAL 3500  // 3.5 segundos para dar tiempo al módulo
 
 // =============================================================================
 // CONFIGURACIÓN INICIAL
@@ -105,8 +101,12 @@ void setup() {
   Serial.begin(115200);
   delay(1000);
   
-  Serial.println("\n=== SISTEMA DE CONTROL DE TIRAS LED ===");
+  Serial.println("\n=== SISTEMA DE CONTROL DE TIRAS LED v3.0 ===");
   Serial.println("Inicializando Arduino UNO R4 WiFi como Punto de Acceso...");
+  Serial.println("IMPORTANTE: Clientes ESP8266 configurados con:");
+  Serial.println("  - GPIO2 para control de relevador");
+  Serial.println("  - Apagado automático: 3 segundos");
+  Serial.println("  - Sin control de apagado desde maestro");
   
   // Configurar pines de los botones
   pinMode(BUTTON1_PIN, INPUT_PULLUP);
@@ -116,15 +116,23 @@ void setup() {
   // Leer estados iniciales
   button1.lastState = digitalRead(BUTTON1_PIN);
   button1.currentState = button1.lastState;
+  button1.lastActivationTime = 0;
+  button1.isProcessing = false;
+  
   button2.lastState = digitalRead(BUTTON2_PIN);
   button2.currentState = button2.lastState;
+  button2.lastActivationTime = 0;
+  button2.isProcessing = false;
+  
   button3.lastState = digitalRead(BUTTON3_PIN);
   button3.currentState = button3.lastState;
+  button3.lastActivationTime = 0;
+  button3.isProcessing = false;
   
-  Serial.println("Botones físicos configurados:");
-  Serial.println("  Botón 1 (Pin " + String(BUTTON1_PIN) + ") → Módulo 1");
-  Serial.println("  Botón 2 (Pin " + String(BUTTON2_PIN) + ") → Módulo 2");
-  Serial.println("  Botón 3 (Pin " + String(BUTTON3_PIN) + ") → Módulo 3");
+  Serial.println("\nBotones físicos configurados:");
+  Serial.println("  Botón 1 (Pin " + String(BUTTON1_PIN) + ") → Módulo 1 (solo encendido)");
+  Serial.println("  Botón 2 (Pin " + String(BUTTON2_PIN) + ") → Módulo 2 (solo encendido)");
+  Serial.println("  Botón 3 (Pin " + String(BUTTON3_PIN) + ") → Módulo 3 (solo encendido)");
   
   // Inicializar estructura de módulos
   initializeModules();
@@ -154,9 +162,6 @@ void loop() {
   
   // Manejar botones físicos
   handlePhysicalButtons();
-  
-  // Manejar temporizadores de módulos
-  handleModuleTimers();
   
   // Manejar conexiones web
   handleWebClients();
@@ -219,17 +224,17 @@ void initializeModules() {
 }
 
 // =============================================================================
-// MANEJO DE LOS BOTONES FÍSICOS
+// MANEJO DE LOS BOTONES FÍSICOS - SOLO ENVÍO DE ENCENDIDO
 // =============================================================================
 
 void handlePhysicalButtons() {
   // Manejar cada botón individualmente
-  handleSingleButton(BUTTON1_PIN, &button1, 0); // Botón 1 → Módulo 1
-  handleSingleButton(BUTTON2_PIN, &button2, 1); // Botón 2 → Módulo 2
-  handleSingleButton(BUTTON3_PIN, &button3, 2); // Botón 3 → Módulo 3
+  handleSingleButton(BUTTON1_PIN, &button1, 1); // Botón 1 → Módulo 1
+  handleSingleButton(BUTTON2_PIN, &button2, 2); // Botón 2 → Módulo 2
+  handleSingleButton(BUTTON3_PIN, &button3, 3); // Botón 3 → Módulo 3
 }
 
-void handleSingleButton(int pin, ButtonState* buttonState, int timerIndex) {
+void handleSingleButton(int pin, ButtonState* buttonState, int moduleId) {
   // Leer estado actual del botón
   int reading = digitalRead(pin);
   
@@ -246,104 +251,58 @@ void handleSingleButton(int pin, ButtonState* buttonState, int timerIndex) {
       buttonState->currentState = reading;
       
       // Botón presionado (LOW porque usamos pull-up)
-      if (buttonState->currentState == LOW) {
+      if (buttonState->currentState == LOW && !buttonState->isProcessing) {
         buttonState->pressed = true;
-        int moduleId = moduleTimers[timerIndex].moduleId;
-        Serial.println("🔘 Botón " + String(timerIndex + 1) + " presionado → Activando módulo " + String(moduleId));
         
-        // Activar módulo correspondiente
-        activateModuleWithTimer(moduleId, timerIndex);
+        // Verificar si ha pasado suficiente tiempo desde la última activación
+        unsigned long currentTime = millis();
+        unsigned long timeSinceLastActivation = currentTime - buttonState->lastActivationTime;
+        
+        if (timeSinceLastActivation < MIN_ACTIVATION_INTERVAL) {
+          unsigned long timeToWait = (MIN_ACTIVATION_INTERVAL - timeSinceLastActivation) / 1000;
+          Serial.println("⏳ Botón " + String(moduleId) + " - Espera " + String(timeToWait) + "s más");
+          Serial.println("   (El módulo necesita completar su ciclo de 3s)");
+          return;
+        }
+        
+        Serial.println("🔘 Botón " + String(moduleId) + " presionado → Enviando señal de encendido");
+        
+        // Verificar que el módulo esté online
+        if (!modules[moduleId - 1].isOnline) {
+          Serial.println("❌ Módulo " + String(moduleId) + " no está online");
+          return;
+        }
+        
+        // Marcar como procesando para evitar múltiples envíos
+        buttonState->isProcessing = true;
+        buttonState->lastActivationTime = currentTime;
+        
+        // Enviar señal de encendido
+        bool success = controlModuleFast(moduleId, true);
+        
+        if (success) {
+          Serial.println("✅ Módulo " + String(moduleId) + " encendido");
+          Serial.println("⏰ El módulo se apagará automáticamente en 3 segundos");
+        } else {
+          Serial.println("❌ Error al encender módulo " + String(moduleId));
+          // Si falla, permitir reintento más rápido
+          buttonState->lastActivationTime = currentTime - (MIN_ACTIVATION_INTERVAL / 2);
+        }
+        
+        // Liberar el procesamiento después de un pequeño delay
+        buttonState->isProcessing = false;
       }
       
       // Botón liberado
-      else if (buttonState->pressed) {
+      else if (buttonState->pressed && buttonState->currentState == HIGH) {
         buttonState->pressed = false;
-        Serial.println("🔘 Botón " + String(timerIndex + 1) + " liberado");
+        buttonState->isProcessing = false;
+        Serial.println("🔘 Botón " + String(moduleId) + " liberado");
       }
     }
   }
   
   buttonState->lastState = reading;
-}
-
-void activateModuleWithTimer(int moduleId, int timerIndex) {
-  // Verificar que el módulo esté online
-  if (!modules[moduleId - 1].isOnline) {
-    Serial.println("❌ Módulo " + String(moduleId) + " no está online");
-    return;
-  }
-  
-  // Si ya hay un temporizador activo para este módulo, cancelarlo
-  if (moduleTimers[timerIndex].autoOffActive) {
-    Serial.println("⏹️ Cancelando temporizador previo para módulo " + String(moduleId));
-    moduleTimers[timerIndex].autoOffActive = false;
-  }
-  
-  // Encender el módulo usando función rápida
-  bool success = controlModuleFast(moduleId, true);
-  
-  if (success) {
-    // Configurar temporizador para apagado automático
-    moduleTimers[timerIndex].autoOffActive = true;
-    moduleTimers[timerIndex].turnOnTime = millis();
-    
-    Serial.println("✅ Módulo " + String(moduleId) + " encendido (rápido)");
-    Serial.println("⏰ Apagado automático en " + String(AUTO_OFF_DELAY / 1000) + " segundos");
-  } else {
-    Serial.println("❌ Error al encender módulo " + String(moduleId));
-  }
-}
-
-void handleModuleTimers() {
-  unsigned long currentTime = millis();
-  
-  // Verificar cada temporizador
-  for (int i = 0; i < 3; i++) {
-    if (moduleTimers[i].autoOffActive) {
-      unsigned long elapsedTime = currentTime - moduleTimers[i].turnOnTime;
-      
-      // Verificar si ha pasado el tiempo de espera
-      if (elapsedTime >= AUTO_OFF_DELAY) {
-        int moduleId = moduleTimers[i].moduleId;
-        
-        // Desactivar temporizador ANTES de enviar comando
-        moduleTimers[i].autoOffActive = false;
-        
-        Serial.println("⏰ Tiempo cumplido - Apagando módulo " + String(moduleId));
-        
-        // Apagar el módulo usando función rápida
-        bool success = controlModuleFast(moduleId, false);
-        
-        if (success) {
-          Serial.println("⏰ Módulo " + String(moduleId) + " apagado automáticamente (rápido)");
-        } else {
-          Serial.println("❌ Error al apagar módulo " + String(moduleId) + " automáticamente");
-        }
-      }
-      // Remover cuenta regresiva para evitar spam en consola
-    }
-  }
-}
-
-// Función para cancelar temporizadores (opcional)
-void cancelModuleTimer(int moduleId) {
-  for (int i = 0; i < 3; i++) {
-    if (moduleTimers[i].moduleId == moduleId && moduleTimers[i].autoOffActive) {
-      moduleTimers[i].autoOffActive = false;
-      Serial.println("⏹️ Temporizador cancelado para módulo " + String(moduleId));
-      break;
-    }
-  }
-}
-
-// Función para verificar si un módulo tiene temporizador activo
-bool hasActiveTimer(int moduleId) {
-  for (int i = 0; i < 3; i++) {
-    if (moduleTimers[i].moduleId == moduleId && moduleTimers[i].autoOffActive) {
-      return true;
-    }
-  }
-  return false;
 }
 
 // =============================================================================
@@ -434,38 +393,64 @@ void processCommand(String cmd) {
   }
 }
 
-// Función rápida para control de módulos sin esperar respuesta completa
+// Función rápida para control de módulos con mejor manejo de errores
 bool controlModuleFast(int moduleId, bool state) {
   if (moduleId < 1 || moduleId > MAX_MODULES) {
+    Serial.println("❌ ID fuera de rango: " + String(moduleId));
     return false;
   }
   
   int index = moduleId - 1;
   if (!modules[index].isOnline) {
+    Serial.println("❌ Módulo " + String(moduleId) + " offline");
     return false;
   }
   
-  WiFiClient client;
-  
-  // Timeout muy corto para conexión rápida
-  if (client.connect(modules[index].ip, 80)) {
-    String httpRequest = "GET ";
-    httpRequest += (state ? "/on" : "/off");
-    httpRequest += " HTTP/1.1";
-    client.println(httpRequest);
-    client.println("Host: " + modules[index].ip.toString());
-    client.println("Connection: close");
-    client.println();
-    
-    // No esperar respuesta, enviar y cerrar inmediatamente
-    client.stop();
-    
-    // Actualizar estado local
-    modules[index].isOn = state;
+  // Solo enviar comando ON desde botones (el OFF lo maneja el cliente)
+  if (!state && buttonPressed(moduleId)) {
+    Serial.println("ℹ️ Módulo " + String(moduleId) + " - Apagado manejado por cliente");
     return true;
   }
   
-  return false;
+  WiFiClient client;
+  client.setTimeout(500);  // Timeout corto de 500ms
+  
+  Serial.println("🔌 Conectando con " + modules[index].ip.toString() + ":80");
+  
+  if (!client.connect(modules[index].ip, 80)) {
+    Serial.println("❌ No se pudo establecer conexión TCP");
+    Serial.println("   Verificar que el módulo esté encendido");
+    Serial.println("   Verificar conexión de red");
+    return false;
+  }
+  
+  // Conexión exitosa, enviar comando
+  String httpRequest = "GET ";
+  httpRequest += (state ? "/on" : "/off");
+  httpRequest += " HTTP/1.1\r\n";
+  httpRequest += "Host: " + modules[index].ip.toString() + "\r\n";
+  httpRequest += "Connection: close\r\n\r\n";
+  
+  client.print(httpRequest);
+  
+  // Pequeño delay para asegurar envío
+  delay(50);
+  
+  // Cerrar conexión inmediatamente
+  client.stop();
+  
+  // Actualizar estado local
+  modules[index].isOn = state;
+  
+  Serial.println("✅ Comando " + String(state ? "ON" : "OFF") + " enviado");
+  return true;
+}
+
+// Función auxiliar para verificar si el comando viene de un botón
+bool buttonPressed(int moduleId) {
+  // Esta función se llama solo desde controlModuleFast
+  // Asumimos que si es módulo 1, 2 o 3 y se llama OFF, no es desde botón
+  return (moduleId >= 1 && moduleId <= 3);
 }
 
 // =============================================================================
@@ -518,6 +503,9 @@ bool controlModule(int moduleId, bool state) {
     if (success) {
       modules[index].isOn = state;
       Serial.println("Módulo " + String(moduleId) + " " + (state ? "encendido" : "apagado"));
+      if (state) {
+        Serial.println("⏰ Nota: El módulo se apagará automáticamente en 3 segundos");
+      }
       return true;
     } else {
       Serial.println("Error al controlar módulo " + String(moduleId));
@@ -543,6 +531,9 @@ void controlAllModules(bool state) {
   }
   
   Serial.println("Comando ejecutado en " + String(successCount) + " módulos");
+  if (state) {
+    Serial.println("⏰ Todos los módulos se apagarán automáticamente en 3 segundos");
+  }
 }
 
 // =============================================================================
@@ -869,13 +860,38 @@ void handleModuleRegistration(WiFiClient& client, String request) {
 }
 
 void handleHeartbeat(WiFiClient& client, String request) {
-  // Extraer ID del módulo
+  // Extraer parámetros del heartbeat
   int idStart = request.indexOf("id=") + 3;
-  int idEnd = request.indexOf(" ", idStart);
-  if (idEnd == -1) idEnd = request.indexOf("&", idStart);
+  int idEnd = request.indexOf("&", idStart);
+  if (idEnd == -1) idEnd = request.indexOf(" ", idStart);
   if (idEnd == -1) idEnd = request.length();
   
   int moduleId = request.substring(idStart, idEnd).toInt();
+  
+  // Extraer estado del relay
+  int stateStart = request.indexOf("state=") + 6;
+  if (stateStart > 6) {
+    int stateEnd = request.indexOf("&", stateStart);
+    if (stateEnd == -1) stateEnd = request.indexOf(" ", stateStart);
+    if (stateEnd == -1) stateEnd = request.length();
+    String stateStr = request.substring(stateStart, stateEnd);
+    bool relayState = (stateStr == "1");
+    
+    // Actualizar estado del módulo
+    if (moduleId >= 1 && moduleId <= MAX_MODULES) {
+      modules[moduleId - 1].isOn = relayState;
+    }
+  }
+  
+  // Extraer información de auto-off si está presente
+  int autoOffStart = request.indexOf("autooffcount=") + 13;
+  if (autoOffStart > 13) {
+    int autoOffEnd = request.indexOf("&", autoOffStart);
+    if (autoOffEnd == -1) autoOffEnd = request.indexOf(" ", autoOffStart);
+    if (autoOffEnd == -1) autoOffEnd = request.length();
+    String autoOffCount = request.substring(autoOffStart, autoOffEnd);
+    // Podemos usar esta información para estadísticas si queremos
+  }
   
   if (moduleId >= 1 && moduleId <= MAX_MODULES) {
     int index = moduleId - 1;
@@ -914,10 +930,17 @@ String generateWebInterface() {
   html += "button{background:#2196F3;color:white;border:none;padding:10px 20px;margin:5px;border-radius:5px;cursor:pointer}";
   html += "button:hover{background:#1976D2}";
   html += ".status{background:#e7f3ff;padding:15px;border-radius:5px;margin:20px 0}";
+  html += ".note{background:#fffbe6;padding:10px;border-radius:5px;margin:10px 0;border-left:4px solid #ff9800}";
   html += "</style></head><body>";
   
   html += "<div class='container'>";
-  html += "<h1>🌈 Sistema de Control LED</h1>";
+  html += "<h1>🌈 Sistema de Control LED v3.0</h1>";
+  
+  // Nota sobre el comportamiento
+  html += "<div class='note'>";
+  html += "⏰ <strong>Apagado automático:</strong> Los módulos se apagan automáticamente después de 3 segundos<br>";
+  html += "📍 <strong>Hardware:</strong> Clientes ESP8266 usan GPIO2 para relay (más estable)";
+  html += "</div>";
   
   // Estado del sistema
   html += "<div class='status'>";
@@ -1041,30 +1064,31 @@ void printSystemStatus() {
   Serial.println("Efecto actual: " + currentEffect);
   Serial.println("Modo automático: " + String(autoMode ? "ON" : "OFF"));
   Serial.println("Uptime: " + String(millis()/1000) + " segundos");
-  
-  // Mostrar estado de temporizadores activos
-  for (int i = 0; i < 3; i++) {
-    if (moduleTimers[i].autoOffActive) {
-      unsigned long timeLeft = AUTO_OFF_DELAY - (millis() - moduleTimers[i].turnOnTime);
-      Serial.println("Timer activo - Módulo " + String(moduleTimers[i].moduleId) + ": " + String(timeLeft/1000) + "s restantes");
-    }
-  }
-  
   Serial.println("=========================\n");
 }
 
 void printModulesStatus() {
   Serial.println("\n=== ESTADO DE MÓDULOS ===");
+  int onlineCount = 0;
+  int onCount = 0;
+  
   for (int i = 0; i < MAX_MODULES; i++) {
     Serial.print("Módulo " + String(i+1) + ": ");
     if (modules[i].isOnline) {
+      onlineCount++;
+      if (modules[i].isOn) onCount++;
+      
       Serial.print("ONLINE (" + modules[i].ip.toString() + ") ");
-      Serial.print(modules[i].isOn ? "ON" : "OFF");
+      Serial.print(modules[i].isOn ? "[ON]" : "[OFF]");
       Serial.println(" - Último heartbeat: " + String((millis() - modules[i].lastHeartbeat)/1000) + "s");
     } else {
       Serial.println("OFFLINE");
     }
   }
+  
+  Serial.println("\nResumen:");
+  Serial.println("  Módulos online: " + String(onlineCount) + "/" + String(MAX_MODULES));
+  Serial.println("  Módulos encendidos: " + String(onCount));
   Serial.println("========================\n");
 }
 
@@ -1076,11 +1100,14 @@ void printSystemInfo() {
   Serial.println("Puerto Web: 80");
   Serial.println("Puerto API: 8080");
   Serial.println("Máximo módulos: " + String(MAX_MODULES));
-  Serial.println("Botones físicos:");
+  Serial.println("\nBotones físicos:");
   Serial.println("  Botón 1: Pin " + String(BUTTON1_PIN) + " → Módulo 1");
   Serial.println("  Botón 2: Pin " + String(BUTTON2_PIN) + " → Módulo 2");
   Serial.println("  Botón 3: Pin " + String(BUTTON3_PIN) + " → Módulo 3");
-  Serial.println("Auto-off: " + String(AUTO_OFF_DELAY / 1000) + " segundos");
+  Serial.println("\nConfiguración de clientes ESP8266:");
+  Serial.println("  Pin de relay: GPIO2 (más estable que GPIO0)");
+  Serial.println("  Apagado automático: 3 segundos");
+  Serial.println("  Control: Solo encendido desde maestro");
   Serial.println("==============================\n");
 }
 
@@ -1104,20 +1131,16 @@ void printCommands() {
   Serial.println("help          - Mostrar esta ayuda");
   Serial.println("");
   Serial.println("BOTONES FÍSICOS:");
-  Serial.println("Botón 1 (Pin " + String(BUTTON1_PIN) + ") → Módulo 1 (ON 2s → OFF)");
-  Serial.println("Botón 2 (Pin " + String(BUTTON2_PIN) + ") → Módulo 2 (ON 2s → OFF)");
-  Serial.println("Botón 3 (Pin " + String(BUTTON3_PIN) + ") → Módulo 3 (ON 2s → OFF)");
+  Serial.println("Botón 1 (Pin " + String(BUTTON1_PIN) + ") → Módulo 1");
+  Serial.println("Botón 2 (Pin " + String(BUTTON2_PIN) + ") → Módulo 2");
+  Serial.println("Botón 3 (Pin " + String(BUTTON3_PIN) + ") → Módulo 3");
+  Serial.println("");
+  Serial.println("NOTA: Los módulos se apagan automáticamente después de 3 segundos");
   Serial.println("============================\n");
 }
 
 void resetSystem() {
   Serial.println("Reiniciando sistema...");
-  
-  // Cancelar todos los temporizadores activos
-  for (int i = 0; i < 3; i++) {
-    moduleTimers[i].autoOffActive = false;
-  }
-  
   initializeModules();
   stopEffect();
   autoMode = false;
