@@ -128,6 +128,15 @@ void setup() {
   // Configurar pines ANTES de cualquier otra cosa
   initializePins();
   
+  // Parpadeo inicial para indicar que el módulo está vivo
+  Serial.println("🔵 LED de estado: Indicando inicio...");
+  for (int i = 0; i < 5; i++) {
+    digitalWrite(STATUS_LED_PIN, HIGH);
+    delay(100);
+    digitalWrite(STATUS_LED_PIN, LOW);
+    delay(100);
+  }
+  
   // Mostrar información del chip
   printChipInfo();
   
@@ -151,6 +160,14 @@ void setup() {
   Serial.println("Estado: " + String(isRegistered ? "Registrado" : "Pendiente"));
   Serial.println("Auto-off: " + String(AUTO_OFF_DELAY/1000.0) + " segundos" + String(configReceived ? " (del maestro)" : " (por defecto)"));
   Serial.println("========================================");
+  Serial.println("");
+  Serial.println("🔵 Indicadores LED:");
+  Serial.println("  - Parpadeo rápido: Buscando WiFi");
+  Serial.println("  - 3 parpadeos rápidos: Conexión exitosa");
+  Serial.println("  - 5 parpadeos lentos: Error de conexión");
+  Serial.println("  - LED breve: Heartbeat");
+  Serial.println("  - LED fijo: Foco encendido");
+  Serial.println("");
 }
 
 // =============================================================================
@@ -208,12 +225,17 @@ void requestConfiguration() {
   configRequestCount++;
   Serial.println("📋 Solicitando configuración al maestro (intento #" + String(configRequestCount) + ")...");
   
+  // Parpadeo mientras solicita configuración
+  digitalWrite(STATUS_LED_PIN, HIGH);
+  
   String url = "http://" + String(masterIP) + ":" + String(masterPort) + "/config";
   
   httpClient.begin(wifiClient, url);
   httpClient.setTimeout(HTTP_TIMEOUT);
   
   int httpCode = httpClient.GET();
+  
+  digitalWrite(STATUS_LED_PIN, LOW);
   
   if (httpCode == HTTP_CODE_OK) {
     String payload = httpClient.getString();
@@ -232,6 +254,14 @@ void requestConfiguration() {
         configReceived = true;
         Serial.println("✅ Configuración recibida:");
         Serial.println("   AUTO_OFF_DELAY: " + String(AUTO_OFF_DELAY) + "ms (" + String(AUTO_OFF_DELAY/1000.0) + " segundos)");
+        
+        // Parpadeo doble rápido para confirmar configuración recibida
+        for (int i = 0; i < 2; i++) {
+          digitalWrite(STATUS_LED_PIN, HIGH);
+          delay(50);
+          digitalWrite(STATUS_LED_PIN, LOW);
+          delay(50);
+        }
       } else {
         Serial.println("⚠️ Valor de delay inválido recibido: " + String(newDelay));
       }
@@ -325,6 +355,7 @@ void printChipInfo() {
 void connectWiFi() {
   Serial.println("--- CONECTANDO WiFi ---");
   Serial.println("SSID: " + String(ssid));
+  Serial.println("🔵 LED parpadeando durante conexión...");
   
   WiFi.mode(WIFI_STA);
   WiFi.setAutoReconnect(true);
@@ -332,11 +363,26 @@ void connectWiFi() {
   WiFi.begin(ssid, password);
   
   int attempts = 0;
+  bool ledState = false;
+  
   while (WiFi.status() != WL_CONNECTED && attempts < 30) {
-    delay(500);
+    // Parpadear LED durante la conexión
+    ledState = !ledState;
+    digitalWrite(STATUS_LED_PIN, ledState ? HIGH : LOW);
+    
+    delay(250);  // Parpadeo rápido cada 250ms
     Serial.print(".");
+    
+    // Segundo parpadeo en el mismo ciclo
+    ledState = !ledState;
+    digitalWrite(STATUS_LED_PIN, ledState ? HIGH : LOW);
+    delay(250);
+    
     attempts++;
   }
+  
+  // Apagar LED al finalizar el intento
+  digitalWrite(STATUS_LED_PIN, LOW);
   
   if (WiFi.status() == WL_CONNECTED) {
     wifiConnected = true;
@@ -345,10 +391,26 @@ void connectWiFi() {
     Serial.println("  IP: " + WiFi.localIP().toString());
     Serial.println("  RSSI: " + String(WiFi.RSSI()) + " dBm");
     Serial.println("  Gateway: " + WiFi.gatewayIP().toString());
+    
+    // Parpadeo rápido 3 veces para indicar conexión exitosa
+    for (int i = 0; i < 3; i++) {
+      digitalWrite(STATUS_LED_PIN, HIGH);
+      delay(100);
+      digitalWrite(STATUS_LED_PIN, LOW);
+      delay(100);
+    }
   } else {
     wifiConnected = false;
     Serial.println();
     Serial.println("✗ Error conectando WiFi");
+    
+    // Parpadeo lento 5 veces para indicar error
+    for (int i = 0; i < 5; i++) {
+      digitalWrite(STATUS_LED_PIN, HIGH);
+      delay(500);
+      digitalWrite(STATUS_LED_PIN, LOW);
+      delay(500);
+    }
   }
 }
 
@@ -363,9 +425,26 @@ void handleWiFiReconnection() {
   
   Serial.println("⚠ WiFi desconectado. Reintento #" + String(reconnectCount));
   
+  // Parpadeo de advertencia - 2 parpadeos largos
+  for (int i = 0; i < 2; i++) {
+    digitalWrite(STATUS_LED_PIN, HIGH);
+    delay(300);
+    digitalWrite(STATUS_LED_PIN, LOW);
+    delay(300);
+  }
+  
   // Reiniciar si hay demasiados fallos
   if (reconnectCount > 10) {
     Serial.println("🔄 Reiniciando módulo por exceso de fallos...");
+    
+    // Parpadeo rápido antes de reiniciar
+    for (int i = 0; i < 10; i++) {
+      digitalWrite(STATUS_LED_PIN, HIGH);
+      delay(50);
+      digitalWrite(STATUS_LED_PIN, LOW);
+      delay(50);
+    }
+    
     delay(1000);
     ESP.restart();
   }
@@ -614,6 +693,9 @@ void registerWithMaster() {
   
   Serial.println("📡 Registrando con maestro...");
   
+  // LED encendido durante registro
+  digitalWrite(STATUS_LED_PIN, HIGH);
+  
   String url = "http://" + String(masterIP) + ":" + String(masterPort) + "/register?id=" + String(MODULE_ID);
   url += "&version=4.0";
   
@@ -622,13 +704,29 @@ void registerWithMaster() {
   
   int httpCode = httpClient.GET();
   
+  digitalWrite(STATUS_LED_PIN, LOW);
+  
   if (httpCode == HTTP_CODE_OK) {
     String payload = httpClient.getString();
     isRegistered = true;
     failedCommands = 0;
     Serial.println("✓ Registro exitoso: " + payload);
+    
+    // Triple parpadeo rápido para confirmar registro
+    for (int i = 0; i < 3; i++) {
+      digitalWrite(STATUS_LED_PIN, HIGH);
+      delay(50);
+      digitalWrite(STATUS_LED_PIN, LOW);
+      delay(50);
+    }
   } else if (httpCode > 0) {
     Serial.println("⚠ Error registro - HTTP " + String(httpCode));
+    
+    // Parpadeo lento para indicar error
+    digitalWrite(STATUS_LED_PIN, HIGH);
+    delay(500);
+    digitalWrite(STATUS_LED_PIN, LOW);
+    
     failedCommands++;
   } else {
     Serial.println("⚠ Error conexión maestro: " + httpClient.errorToString(httpCode));
@@ -646,6 +744,11 @@ void handleHeartbeat() {
 }
 
 void sendHeartbeat() {
+  // Breve parpadeo durante heartbeat
+  digitalWrite(STATUS_LED_PIN, HIGH);
+  delay(20);
+  digitalWrite(STATUS_LED_PIN, LOW);
+  
   String url = "http://" + String(masterIP) + ":" + String(masterPort) + "/heartbeat";
   url += "?id=" + String(MODULE_ID);
   url += "&state=" + String(relayState ? "1" : "0");
@@ -672,6 +775,15 @@ void sendHeartbeat() {
     // Re-registro si fallan muchos heartbeats
     if (failedCommands > 3) {
       Serial.println("🔄 Demasiados fallos, re-registrando...");
+      
+      // Parpadeo de advertencia
+      for (int i = 0; i < 5; i++) {
+        digitalWrite(STATUS_LED_PIN, HIGH);
+        delay(100);
+        digitalWrite(STATUS_LED_PIN, LOW);
+        delay(100);
+      }
+      
       isRegistered = false;
       configReceived = false;  // También obtener config de nuevo
       failedCommands = 0;
