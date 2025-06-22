@@ -1,7 +1,7 @@
 /*
  * Sistema de Control de Focos - ESP8266-01S (Módulo Cliente)
  * Autor: Sistema Control de Iluminación
- * Versión: 3.0 - Con apagado automático
+ * Versión: 3.0 - Con apagado automático (Sin prueba de relay al inicio)
  * 
  * IMPORTANTE: Cambiar MODULE_ID para cada módulo (1-12)
  * 
@@ -10,6 +10,7 @@
  * - Control de focos de 10W en lugar de tiras LED
  * - Agregado apagado automático después de 3 segundos
  * - El módulo se apaga solo sin necesidad de señal del maestro
+ * - ELIMINADA la prueba de relay de 3 pulsos al inicio
  * 
  * Funcionalidades:
  * - Conexión automática al Arduino UNO R4 WiFi
@@ -231,28 +232,9 @@ void initializePins() {
   Serial.println("  Estado OFF = " + String(RELAY_OFF == HIGH ? "HIGH" : "LOW"));
   Serial.println("  Estado ON = " + String(RELAY_ON == HIGH ? "HIGH" : "LOW"));
   
-  // Test del relay con confirmación visual
-  Serial.println("\n🧪 Probando relay (3 pulsos)...");
-  for (int i = 0; i < 3; i++) {
-    Serial.print("  Pulso " + String(i+1) + ": ");
-    
-    // Encender
-    digitalWrite(RELAY_PIN, RELAY_ON);
-    digitalWrite(STATUS_LED_PIN, HIGH);
-    Serial.print("ON ");
-    delay(500);
-    
-    // Apagar
-    digitalWrite(RELAY_PIN, RELAY_OFF);
-    digitalWrite(STATUS_LED_PIN, LOW);
-    Serial.println("OFF");
-    delay(500);
-  }
-  
-  // Asegurar que quede apagado
-  digitalWrite(RELAY_PIN, RELAY_OFF);
-  digitalWrite(STATUS_LED_PIN, LOW);
-  Serial.println("✓ Test completado - Relay en estado OFF\n");
+  // Sin prueba de relay - módulo listo inmediatamente
+  Serial.println("✓ Configuración completada - Relay en estado OFF");
+  Serial.println("ℹ️ Prueba de relay omitida para inicio más rápido\n");
 }
 
 void printChipInfo() {
