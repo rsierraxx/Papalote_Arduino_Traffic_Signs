@@ -1,16 +1,18 @@
 /*
  * Sistema de Control de 12 Focos - Arduino UNO R4 WiFi (Maestro)
  * Autor: Sistema Control de Iluminación
- * Versión: 3.0 - Sin apagado automático
+ * Versión: 4.0 - Con servidor de configuración
  * 
- * Cambios en v3.0:
- * - Eliminado el apagado automático desde el maestro
- * - Los botones solo envían señal de encendido
- * - El apagado es manejado por cada módulo cliente (3 segundos)
+ * Cambios en v4.0:
+ * - Agregado endpoint /config para servir configuración a clientes
+ * - AUTO_OFF_DELAY configurable desde el maestro
+ * - Los clientes leen la configuración al conectarse
+ * - Posibilidad de cambiar dinámicamente el tiempo de apagado
  * 
  * Funcionalidades:
  * - Punto de acceso WiFi autónomo
  * - Control de 12 módulos ESP8266-01S (focos de 10W)
+ * - Servidor de configuración centralizada
  * - Sistema de registro automático de módulos
  * - Efectos predefinidos y personalizables
  * - Monitoreo de estado en tiempo real
@@ -37,6 +39,9 @@ const IPAddress subnet(255, 255, 255, 0);
 #define MODULE_TIMEOUT 120000     // 2 minutos para considerar módulo offline
 #define EFFECT_DELAY_DEFAULT 500  // Delay por defecto para efectos (ms)
 
+// CONFIGURACIÓN CENTRALIZADA - Cambiar aquí afecta a todos los clientes
+unsigned long AUTO_OFF_DELAY = 3000;  // Tiempo de apagado automático en ms (3 segundos por defecto)
+
 // Configuración de los botones físicos
 #define BUTTON1_PIN 2             // Pin digital 2 para botón 1 (Módulo 1)
 #define BUTTON2_PIN 3             // Pin digital 3 para botón 2 (Módulo 2)
@@ -59,6 +64,8 @@ struct ModuleInfo {
   bool isOn;
   unsigned long lastHeartbeat;
   String status;
+  String version;  // Nueva: versión del cliente
+  unsigned long configuredDelay;  // Nueva: delay configurado en el cliente
 };
 
 ModuleInfo modules[MAX_MODULES];
@@ -82,16 +89,18 @@ struct ButtonState {
   bool currentState;
   unsigned long lastDebounceTime;
   bool pressed;
-  unsigned long lastActivationTime;  // Nueva variable para control de tiempo
-  bool isProcessing;                 // Nueva variable para evitar múltiples envíos
+  unsigned long lastActivationTime;
+  bool isProcessing;
 };
 
 ButtonState button1 = {HIGH, HIGH, 0, false, 0, false};
 ButtonState button2 = {HIGH, HIGH, 0, false, 0, false};
 ButtonState button3 = {HIGH, HIGH, 0, false, 0, false};
 
-// Tiempo mínimo entre activaciones (ms)
-#define MIN_ACTIVATION_INTERVAL 3500  // 3.5 segundos para dar tiempo al módulo
+// Tiempo mínimo entre activaciones (ms) - ahora dinámico basado en AUTO_OFF_DELAY
+unsigned long getMinActivationInterval() {
+  return AUTO_OFF_DELAY + 500;  // AUTO_OFF_DELAY + 500ms de margen
+}
 
 // =============================================================================
 // CONFIGURACIÓN INICIAL
@@ -101,12 +110,12 @@ void setup() {
   Serial.begin(115200);
   delay(1000);
   
-  Serial.println("\n=== SISTEMA DE CONTROL DE FOCOS v3.0 ===");
+  Serial.println("\n=== SISTEMA DE CONTROL DE FOCOS v4.0 ===");
   Serial.println("Inicializando Arduino UNO R4 WiFi como Punto de Acceso...");
-  Serial.println("IMPORTANTE: Clientes ESP8266 configurados con:");
-  Serial.println("  - GPIO0 para control de relevador (focos 10W)");
-  Serial.println("  - Apagado automático: 3 segundos");
-  Serial.println("  - Sin control de apagado desde maestro");
+  Serial.println("IMPORTANTE: Configuración centralizada:");
+  Serial.println("  - AUTO_OFF_DELAY: " + String(AUTO_OFF_DELAY) + "ms (" + String(AUTO_OFF_DELAY/1000.0) + " segundos)");
+  Serial.println("  - Los clientes leerán esta configuración al conectarse");
+  Serial.println("  - Endpoint de configuración: /config (puerto 8080)");
   
   // Configurar pines de los botones
   pinMode(BUTTON1_PIN, INPUT_PULLUP);
@@ -130,9 +139,9 @@ void setup() {
   button3.isProcessing = false;
   
   Serial.println("\nBotones físicos configurados:");
-  Serial.println("  Botón 1 (Pin " + String(BUTTON1_PIN) + ") → Módulo 1 (solo encendido)");
-  Serial.println("  Botón 2 (Pin " + String(BUTTON2_PIN) + ") → Módulo 2 (solo encendido)");
-  Serial.println("  Botón 3 (Pin " + String(BUTTON3_PIN) + ") → Módulo 3 (solo encendido)");
+  Serial.println("  Botón 1 (Pin " + String(BUTTON1_PIN) + ") → Módulo 1");
+  Serial.println("  Botón 2 (Pin " + String(BUTTON2_PIN) + ") → Módulo 2");
+  Serial.println("  Botón 3 (Pin " + String(BUTTON3_PIN) + ") → Módulo 3");
   
   // Inicializar estructura de módulos
   initializeModules();
@@ -218,13 +227,15 @@ void initializeModules() {
     modules[i].isOn = false;
     modules[i].lastHeartbeat = 0;
     modules[i].status = "offline";
+    modules[i].version = "unknown";
+    modules[i].configuredDelay = 0;
   }
   registeredModules = 0;
   Serial.println("Estructura de módulos inicializada");
 }
 
 // =============================================================================
-// MANEJO DE LOS BOTONES FÍSICOS - SOLO ENVÍO DE ENCENDIDO
+// MANEJO DE LOS BOTONES FÍSICOS
 // =============================================================================
 
 void handlePhysicalButtons() {
@@ -257,11 +268,12 @@ void handleSingleButton(int pin, ButtonState* buttonState, int moduleId) {
         // Verificar si ha pasado suficiente tiempo desde la última activación
         unsigned long currentTime = millis();
         unsigned long timeSinceLastActivation = currentTime - buttonState->lastActivationTime;
+        unsigned long minInterval = getMinActivationInterval();
         
-        if (timeSinceLastActivation < MIN_ACTIVATION_INTERVAL) {
-          unsigned long timeToWait = (MIN_ACTIVATION_INTERVAL - timeSinceLastActivation) / 1000;
+        if (timeSinceLastActivation < minInterval) {
+          unsigned long timeToWait = (minInterval - timeSinceLastActivation) / 1000;
           Serial.println("⏳ Botón " + String(moduleId) + " - Espera " + String(timeToWait) + "s más");
-          Serial.println("   (El módulo necesita completar su ciclo de 3s)");
+          Serial.println("   (El módulo necesita completar su ciclo de " + String(AUTO_OFF_DELAY/1000.0) + "s)");
           return;
         }
         
@@ -282,11 +294,11 @@ void handleSingleButton(int pin, ButtonState* buttonState, int moduleId) {
         
         if (success) {
           Serial.println("✅ Módulo " + String(moduleId) + " encendido");
-          Serial.println("⏰ El módulo se apagará automáticamente en 3 segundos");
+          Serial.println("⏰ El módulo se apagará automáticamente en " + String(AUTO_OFF_DELAY/1000.0) + " segundos");
         } else {
           Serial.println("❌ Error al encender módulo " + String(moduleId));
           // Si falla, permitir reintento más rápido
-          buttonState->lastActivationTime = currentTime - (MIN_ACTIVATION_INTERVAL / 2);
+          buttonState->lastActivationTime = currentTime - (minInterval / 2);
         }
         
         // Liberar el procesamiento después de un pequeño delay
@@ -338,6 +350,16 @@ void processCommand(String cmd) {
       Serial.println("ID de módulo inválido (1-12)");
     }
   }
+  else if (cmd.startsWith("setdelay ")) {
+    unsigned long newDelay = cmd.substring(9).toInt();
+    if (newDelay >= 1000 && newDelay <= 60000) {
+      AUTO_OFF_DELAY = newDelay;
+      Serial.println("⏰ AUTO_OFF_DELAY cambiado a: " + String(AUTO_OFF_DELAY) + "ms (" + String(AUTO_OFF_DELAY/1000.0) + " segundos)");
+      Serial.println("   Los clientes aplicarán este cambio en su próxima conexión");
+    } else {
+      Serial.println("Delay inválido (1000-60000ms)");
+    }
+  }
   else if (cmd == "all_on") {
     controlAllModules(true);
   }
@@ -372,6 +394,9 @@ void processCommand(String cmd) {
   }
   else if (cmd == "modules") {
     printModulesStatus();
+  }
+  else if (cmd == "config") {
+    printConfiguration();
   }
   else if (cmd == "reset") {
     resetSystem();
@@ -504,7 +529,7 @@ bool controlModule(int moduleId, bool state) {
       modules[index].isOn = state;
       Serial.println("Módulo " + String(moduleId) + " " + (state ? "encendido" : "apagado"));
       if (state) {
-        Serial.println("⏰ Nota: El módulo se apagará automáticamente en 3 segundos");
+        Serial.println("⏰ Nota: El módulo se apagará automáticamente en " + String(AUTO_OFF_DELAY/1000.0) + " segundos");
       }
       return true;
     } else {
@@ -532,7 +557,7 @@ void controlAllModules(bool state) {
   
   Serial.println("Comando ejecutado en " + String(successCount) + " focos");
   if (state) {
-    Serial.println("⏰ Todos los focos se apagarán automáticamente en 3 segundos");
+    Serial.println("⏰ Todos los focos se apagarán automáticamente en " + String(AUTO_OFF_DELAY/1000.0) + " segundos");
   }
 }
 
@@ -715,6 +740,10 @@ void handleWebClients() {
       handleApiModulesRequest(client);
       return;
     }
+    else if (request.indexOf("/api/setdelay") != -1) {
+      handleSetDelayRequest(client, request);
+      return;
+    }
     
     // Generar respuesta HTML para la página principal
     String html = generateWebInterface();
@@ -743,8 +772,58 @@ void handleApiClients() {
     else if (request.indexOf("/heartbeat") != -1) {
       handleHeartbeat(client, request);
     }
+    // NUEVO: Servir configuración a clientes
+    else if (request.indexOf("/config") != -1) {
+      handleConfigRequest(client);
+    }
     
     client.stop();
+  }
+}
+
+// NUEVO: Manejar solicitud de configuración
+void handleConfigRequest(WiFiClient& client) {
+  String json = "{";
+  json += "\"auto_off_delay\":" + String(AUTO_OFF_DELAY) + ",";
+  json += "\"version\":\"4.0\",";
+  json += "\"max_modules\":" + String(MAX_MODULES) + ",";
+  json += "\"effect_delay\":" + String(effectDelay);
+  json += "}";
+  
+  client.println("HTTP/1.1 200 OK");
+  client.println("Content-Type: application/json");
+  client.println("Connection: close");
+  client.println();
+  client.println(json);
+  
+  Serial.println("📤 Configuración enviada a cliente desde " + client.remoteIP().toString());
+}
+
+// NUEVO: Manejar cambio de delay desde web
+void handleSetDelayRequest(WiFiClient& client, String request) {
+  // Extraer nuevo delay
+  int delayStart = request.indexOf("delay=") + 6;
+  int delayEnd = request.indexOf(" ", delayStart);
+  if (delayEnd == -1) delayEnd = request.indexOf("&", delayStart);
+  if (delayEnd == -1) delayEnd = request.length();
+  
+  unsigned long newDelay = request.substring(delayStart, delayEnd).toInt();
+  
+  if (newDelay >= 1000 && newDelay <= 60000) {
+    AUTO_OFF_DELAY = newDelay;
+    
+    client.println("HTTP/1.1 200 OK");
+    client.println("Content-Type: application/json");
+    client.println("Connection: close");
+    client.println();
+    client.println("{\"status\":\"ok\",\"new_delay\":" + String(AUTO_OFF_DELAY) + "}");
+    
+    Serial.println("⏰ AUTO_OFF_DELAY cambiado a " + String(AUTO_OFF_DELAY) + "ms desde interfaz web");
+  } else {
+    client.println("HTTP/1.1 400 Bad Request");
+    client.println("Connection: close");
+    client.println();
+    client.println("{\"error\":\"Invalid delay value\"}");
   }
 }
 
@@ -822,12 +901,23 @@ void handleModuleRegistration(WiFiClient& client, String request) {
   
   int moduleId = request.substring(idStart, idEnd).toInt();
   
+  // Extraer versión si está presente
+  String version = "unknown";
+  int versionStart = request.indexOf("version=") + 8;
+  if (versionStart > 8) {
+    int versionEnd = request.indexOf("&", versionStart);
+    if (versionEnd == -1) versionEnd = request.indexOf(" ", versionStart);
+    if (versionEnd == -1) versionEnd = request.length();
+    version = request.substring(versionStart, versionEnd);
+  }
+  
   if (moduleId >= 1 && moduleId <= MAX_MODULES) {
     int index = moduleId - 1;
     modules[index].ip = client.remoteIP();
     modules[index].isOnline = true;
     modules[index].lastHeartbeat = millis();
     modules[index].status = "online";
+    modules[index].version = version;
     
     // Incrementar contador si es un módulo nuevo
     bool isNewModule = true;
@@ -842,7 +932,7 @@ void handleModuleRegistration(WiFiClient& client, String request) {
       registeredModules++;
     }
     
-    Serial.println("Módulo " + String(moduleId) + " registrado desde IP: " + client.remoteIP().toString());
+    Serial.println("Módulo " + String(moduleId) + " registrado desde IP: " + client.remoteIP().toString() + " (v" + version + ")");
     
     // Respuesta de éxito
     client.println("HTTP/1.1 200 OK");
@@ -880,6 +970,19 @@ void handleHeartbeat(WiFiClient& client, String request) {
     // Actualizar estado del módulo
     if (moduleId >= 1 && moduleId <= MAX_MODULES) {
       modules[moduleId - 1].isOn = relayState;
+    }
+  }
+  
+  // Extraer delay configurado si está presente
+  int delayStart = request.indexOf("configured_delay=") + 17;
+  if (delayStart > 17) {
+    int delayEnd = request.indexOf("&", delayStart);
+    if (delayEnd == -1) delayEnd = request.indexOf(" ", delayStart);
+    if (delayEnd == -1) delayEnd = request.length();
+    unsigned long configuredDelay = request.substring(delayStart, delayEnd).toInt();
+    
+    if (moduleId >= 1 && moduleId <= MAX_MODULES) {
+      modules[moduleId - 1].configuredDelay = configuredDelay;
     }
   }
   
@@ -931,15 +1034,27 @@ String generateWebInterface() {
   html += "button:hover{background:#1976D2}";
   html += ".status{background:#e7f3ff;padding:15px;border-radius:5px;margin:20px 0}";
   html += ".note{background:#fffbe6;padding:10px;border-radius:5px;margin:10px 0;border-left:4px solid #ff9800}";
+  html += ".config{background:#f0f0f0;padding:15px;border-radius:5px;margin:20px 0}";
+  html += "input[type='number']{padding:5px;margin:0 10px;width:80px}";
   html += "</style></head><body>";
   
   html += "<div class='container'>";
   html += "<h1>💡 Sistema de Control de Focos</h1>";
   
+  // Configuración de tiempo
+  html += "<div class='config'>";
+  html += "<h3>⚙️ Configuración del Sistema</h3>";
+  html += "<p>Tiempo de apagado automático: ";
+  html += "<input type='number' id='delayInput' min='1000' max='60000' step='1000' value='" + String(AUTO_OFF_DELAY) + "'>";
+  html += "ms (" + String(AUTO_OFF_DELAY/1000.0) + " segundos)";
+  html += "<button onclick='updateDelay()'>Actualizar</button></p>";
+  html += "</div>";
+  
   // Nota sobre el comportamiento
   html += "<div class='note'>";
-  html += "⏰ <strong>Apagado automático:</strong> Los focos se apagan automáticamente después de 3 segundos<br>";
-  html += "💡 <strong>Hardware:</strong> Control de focos de 10W mediante relevadores";
+  html += "⏰ <strong>Apagado automático:</strong> Los focos se apagan automáticamente después de " + String(AUTO_OFF_DELAY/1000.0) + " segundos<br>";
+  html += "💡 <strong>Hardware:</strong> Control de focos de 10W mediante relevadores<br>";
+  html += "🔄 <strong>Configuración:</strong> Los cambios se aplicarán cuando los módulos se reconecten";
   html += "</div>";
   
   // Estado del sistema
@@ -962,6 +1077,9 @@ String generateWebInterface() {
     html += "<div>" + String(i+1) + "</div>";
     String statusText = modules[i].isOnline ? "ON" : "OFF";
     html += "<div style='font-size:12px'>" + statusText + "</div>";
+    if (modules[i].isOnline && modules[i].configuredDelay > 0) {
+      html += "<div style='font-size:10px'>" + String(modules[i].configuredDelay/1000) + "s</div>";
+    }
     html += "</div>";
   }
   html += "</div>";
@@ -991,6 +1109,10 @@ String generateWebInterface() {
   html += "function sendCommand(cmd){";
   html += "  fetch('/api/command?cmd='+cmd).then(()=>location.reload());";
   html += "}";
+  html += "function updateDelay(){";
+  html += "  var delay = document.getElementById('delayInput').value;";
+  html += "  fetch('/api/setdelay?delay='+delay).then(()=>location.reload());";
+  html += "}";
   html += "setTimeout(()=>location.reload(), 5000);"; // Auto-refresh cada 5 segundos
   html += "</script>";
   
@@ -1006,6 +1128,7 @@ String generateStatusJson() {
   json += "\"autoMode\":" + String(autoMode ? "true" : "false") + ",";
   json += "\"onlineModules\":" + String(getOnlineModulesCount()) + ",";
   json += "\"totalModules\":" + String(MAX_MODULES) + ",";
+  json += "\"autoOffDelay\":" + String(AUTO_OFF_DELAY) + ",";
   json += "\"uptime\":" + String(millis()) + "";
   json += "}";
   return json;
@@ -1020,6 +1143,8 @@ String generateModulesJson() {
     json += "\"ip\":\"" + modules[i].ip.toString() + "\",";
     json += "\"online\":" + String(modules[i].isOnline ? "true" : "false") + ",";
     json += "\"state\":" + String(modules[i].isOn ? "true" : "false") + ",";
+    json += "\"version\":\"" + modules[i].version + "\",";
+    json += "\"configuredDelay\":" + String(modules[i].configuredDelay) + ",";
     json += "\"lastHeartbeat\":" + String(modules[i].lastHeartbeat) + "";
     json += "}";
   }
@@ -1063,6 +1188,7 @@ void printSystemStatus() {
   Serial.println("Módulos online: " + String(getOnlineModulesCount()) + "/" + String(MAX_MODULES));
   Serial.println("Efecto actual: " + currentEffect);
   Serial.println("Modo automático: " + String(autoMode ? "ON" : "OFF"));
+  Serial.println("AUTO_OFF_DELAY: " + String(AUTO_OFF_DELAY) + "ms (" + String(AUTO_OFF_DELAY/1000.0) + " segundos)");
   Serial.println("Uptime: " + String(millis()/1000) + " segundos");
   Serial.println("=========================\n");
 }
@@ -1080,6 +1206,8 @@ void printModulesStatus() {
       
       Serial.print("ONLINE (" + modules[i].ip.toString() + ") ");
       Serial.print(modules[i].isOn ? "[ON]" : "[OFF]");
+      Serial.print(" v" + modules[i].version);
+      Serial.print(" Delay:" + String(modules[i].configuredDelay) + "ms");
       Serial.println(" - Último heartbeat: " + String((millis() - modules[i].lastHeartbeat)/1000) + "s");
     } else {
       Serial.println("OFFLINE");
@@ -1090,6 +1218,16 @@ void printModulesStatus() {
   Serial.println("  Módulos online: " + String(onlineCount) + "/" + String(MAX_MODULES));
   Serial.println("  Módulos encendidos: " + String(onCount));
   Serial.println("========================\n");
+}
+
+void printConfiguration() {
+  Serial.println("\n=== CONFIGURACIÓN ACTUAL ===");
+  Serial.println("AUTO_OFF_DELAY: " + String(AUTO_OFF_DELAY) + "ms (" + String(AUTO_OFF_DELAY/1000.0) + " segundos)");
+  Serial.println("EFFECT_DELAY: " + String(effectDelay) + "ms");
+  Serial.println("HEARTBEAT_INTERVAL: " + String(HEARTBEAT_INTERVAL/1000) + " segundos");
+  Serial.println("MODULE_TIMEOUT: " + String(MODULE_TIMEOUT/1000) + " segundos");
+  Serial.println("MIN_ACTIVATION_INTERVAL: " + String(getMinActivationInterval()) + "ms");
+  Serial.println("===========================\n");
 }
 
 void printSystemInfo() {
@@ -1107,8 +1245,8 @@ void printSystemInfo() {
   Serial.println("\nConfiguración de clientes ESP8266:");
   Serial.println("  Pin de relay: GPIO0 (con resistencia pull-up 10K)");
   Serial.println("  Control de focos: 10W por módulo");
-  Serial.println("  Apagado automático: 3 segundos");
-  Serial.println("  Control: Solo encendido desde maestro");
+  Serial.println("  Apagado automático: " + String(AUTO_OFF_DELAY/1000.0) + " segundos (configurable)");
+  Serial.println("  Endpoint de configuración: http://" + WiFi.localIP().toString() + ":8080/config");
   Serial.println("==============================\n");
 }
 
@@ -1126,8 +1264,10 @@ void printCommands() {
   Serial.println("auto_on       - Activar modo automático");
   Serial.println("auto_off      - Desactivar modo automático");
   Serial.println("speed [ms]    - Ajustar velocidad efecto");
+  Serial.println("setdelay [ms] - Cambiar tiempo de apagado (1000-60000)");
   Serial.println("status        - Estado del sistema");
   Serial.println("modules       - Estado de módulos");
+  Serial.println("config        - Mostrar configuración actual");
   Serial.println("reset         - Reiniciar sistema");
   Serial.println("help          - Mostrar esta ayuda");
   Serial.println("");
@@ -1136,7 +1276,8 @@ void printCommands() {
   Serial.println("Botón 2 (Pin " + String(BUTTON2_PIN) + ") → Módulo 2");
   Serial.println("Botón 3 (Pin " + String(BUTTON3_PIN) + ") → Módulo 3");
   Serial.println("");
-  Serial.println("NOTA: Los módulos se apagan automáticamente después de 3 segundos");
+  Serial.println("CONFIGURACIÓN:");
+  Serial.println("Los módulos se apagarán automáticamente después de " + String(AUTO_OFF_DELAY/1000.0) + " segundos");
   Serial.println("============================\n");
 }
 

@@ -1,22 +1,22 @@
 /*
  * Sistema de Control de Focos - ESP8266-01S (Módulo Cliente)
  * Autor: Sistema Control de Iluminación
- * Versión: 3.0 - Con apagado automático (Sin prueba de relay al inicio)
+ * Versión: 4.0 - Con configuración dinámica
  * 
  * IMPORTANTE: Cambiar MODULE_ID para cada módulo (1-12)
  * 
- * Cambios en v3.0:
- * - Usando GPIO0 para el relevador (con resistencia pull-up 10K)
- * - Control de focos de 10W en lugar de tiras LED
- * - Agregado apagado automático después de 3 segundos
- * - El módulo se apaga solo sin necesidad de señal del maestro
- * - ELIMINADA la prueba de relay de 3 pulsos al inicio
+ * Cambios en v4.0:
+ * - Lee configuración de AUTO_OFF_DELAY del maestro al conectarse
+ * - Actualiza configuración cada vez que se reconecta
+ * - Envía delay configurado en heartbeat
+ * - Interfaz web muestra tiempo configurado dinámicamente
  * 
  * Funcionalidades:
  * - Conexión automática al Arduino UNO R4 WiFi
  * - Auto-registro con ID único
+ * - Configuración dinámica desde maestro
  * - Control de relevador para foco de 10W
- * - Apagado automático después de 3 segundos
+ * - Apagado automático configurable
  * - Servidor HTTP integrado
  * - Sistema de heartbeat automático
  * - Reconexión automática
@@ -67,11 +67,13 @@ const int masterPort = 8080;
 // CONFIGURACIÓN DE TIEMPOS
 // =============================================================================
 
-#define AUTO_OFF_DELAY 3000         // 3 segundos para apagado automático
-#define HEARTBEAT_INTERVAL 45000    // 45 segundos
-#define RECONNECT_DELAY 5000        // 5 segundos
-#define REGISTRATION_RETRY 10000    // 10 segundos
-#define HTTP_TIMEOUT 5000           // 5 segundos
+// AUTO_OFF_DELAY ahora es variable y se lee del maestro
+unsigned long AUTO_OFF_DELAY = 3000;      // Valor por defecto 3 segundos
+#define HEARTBEAT_INTERVAL 45000          // 45 segundos
+#define RECONNECT_DELAY 5000              // 5 segundos
+#define REGISTRATION_RETRY 10000          // 10 segundos
+#define HTTP_TIMEOUT 5000                 // 5 segundos
+#define CONFIG_RETRY_INTERVAL 30000       // 30 segundos para reintentar config
 
 // =============================================================================
 // VARIABLES GLOBALES
@@ -85,9 +87,11 @@ HTTPClient httpClient;
 bool relayState = false;
 bool isRegistered = false;
 bool wifiConnected = false;
+bool configReceived = false;
 unsigned long lastHeartbeat = 0;
 unsigned long lastReconnect = 0;
 unsigned long lastRegistration = 0;
+unsigned long lastConfigRequest = 0;
 unsigned long bootTime = 0;
 
 // Variables para apagado automático
@@ -100,6 +104,7 @@ int failedCommands = 0;
 int heartbeatCount = 0;
 int reconnectCount = 0;
 int autoOffCount = 0;
+int configRequestCount = 0;
 
 // =============================================================================
 // SETUP - CONFIGURACIÓN INICIAL
@@ -113,10 +118,10 @@ void setup() {
   
   Serial.println();
   Serial.println("========================================");
-  Serial.println("    MODULO CONTROL FOCO ESP8266-01S v3.0");
+  Serial.println("    MODULO CONTROL FOCO ESP8266-01S v4.0");
   Serial.println("========================================");
   Serial.println("ID: " + String(MODULE_ID));
-  Serial.println("Version: 3.0 - Auto-off 3 segundos");
+  Serial.println("Version: 4.0 - Configuración dinámica");
   Serial.println("Foco: 10W");
   Serial.println("Inicializando...");
   
@@ -132,6 +137,11 @@ void setup() {
   // Configurar servidor web
   setupWebServer();
   
+  // Intentar obtener configuración del maestro
+  if (wifiConnected) {
+    requestConfiguration();
+  }
+  
   // Primer intento de registro
   registerWithMaster();
   
@@ -139,7 +149,7 @@ void setup() {
   Serial.println("MODULO LISTO - ID: " + String(MODULE_ID));
   Serial.println("IP: " + WiFi.localIP().toString());
   Serial.println("Estado: " + String(isRegistered ? "Registrado" : "Pendiente"));
-  Serial.println("Auto-off: ACTIVADO (3 segundos)");
+  Serial.println("Auto-off: " + String(AUTO_OFF_DELAY/1000.0) + " segundos" + String(configReceived ? " (del maestro)" : " (por defecto)"));
   Serial.println("========================================");
 }
 
@@ -160,6 +170,11 @@ void loop() {
   } else {
     wifiConnected = true;
     
+    // Si no tenemos configuración, intentar obtenerla
+    if (!configReceived) {
+      handleConfigurationRequest();
+    }
+    
     // Manejar registro con maestro
     if (!isRegistered) {
       handleRegistration();
@@ -179,6 +194,58 @@ void loop() {
 }
 
 // =============================================================================
+// OBTENCIÓN DE CONFIGURACIÓN DESDE MAESTRO
+// =============================================================================
+
+void handleConfigurationRequest() {
+  if (millis() - lastConfigRequest < CONFIG_RETRY_INTERVAL) return;
+  
+  lastConfigRequest = millis();
+  requestConfiguration();
+}
+
+void requestConfiguration() {
+  configRequestCount++;
+  Serial.println("📋 Solicitando configuración al maestro (intento #" + String(configRequestCount) + ")...");
+  
+  String url = "http://" + String(masterIP) + ":" + String(masterPort) + "/config";
+  
+  httpClient.begin(wifiClient, url);
+  httpClient.setTimeout(HTTP_TIMEOUT);
+  
+  int httpCode = httpClient.GET();
+  
+  if (httpCode == HTTP_CODE_OK) {
+    String payload = httpClient.getString();
+    
+    // Parsear JSON simple manualmente
+    int delayStart = payload.indexOf("\"auto_off_delay\":") + 17;
+    if (delayStart > 17) {
+      int delayEnd = payload.indexOf(",", delayStart);
+      if (delayEnd == -1) delayEnd = payload.indexOf("}", delayStart);
+      
+      String delayStr = payload.substring(delayStart, delayEnd);
+      unsigned long newDelay = delayStr.toInt();
+      
+      if (newDelay >= 1000 && newDelay <= 60000) {
+        AUTO_OFF_DELAY = newDelay;
+        configReceived = true;
+        Serial.println("✅ Configuración recibida:");
+        Serial.println("   AUTO_OFF_DELAY: " + String(AUTO_OFF_DELAY) + "ms (" + String(AUTO_OFF_DELAY/1000.0) + " segundos)");
+      } else {
+        Serial.println("⚠️ Valor de delay inválido recibido: " + String(newDelay));
+      }
+    }
+  } else if (httpCode > 0) {
+    Serial.println("⚠️ Error obteniendo configuración - HTTP " + String(httpCode));
+  } else {
+    Serial.println("⚠️ Error conectando para configuración: " + httpClient.errorToString(httpCode));
+  }
+  
+  httpClient.end();
+}
+
+// =============================================================================
 // CONTROL DE APAGADO AUTOMÁTICO
 // =============================================================================
 
@@ -188,7 +255,7 @@ void handleAutoOff() {
     unsigned long currentTime = millis();
     unsigned long elapsedTime = currentTime - turnOnTime;
     
-    // Verificar si han pasado 3 segundos
+    // Verificar si ha pasado el tiempo configurado
     if (elapsedTime >= AUTO_OFF_DELAY) {
       // Apagar el relevador
       setRelayState(false, false);  // false = no activar timer
@@ -197,7 +264,7 @@ void handleAutoOff() {
       autoOffActive = false;
       autoOffCount++;
       
-      Serial.println("⏰ APAGADO AUTOMÁTICO ejecutado (3 segundos cumplidos)");
+      Serial.println("⏰ APAGADO AUTOMÁTICO ejecutado (" + String(AUTO_OFF_DELAY/1000.0) + " segundos cumplidos)");
       Serial.println("   Total apagados automáticos: " + String(autoOffCount));
     }
   }
@@ -292,6 +359,7 @@ void handleWiFiReconnection() {
   reconnectCount++;
   wifiConnected = false;
   isRegistered = false;
+  configReceived = false;  // Necesitamos obtener config de nuevo
   
   Serial.println("⚠ WiFi desconectado. Reintento #" + String(reconnectCount));
   
@@ -306,6 +374,11 @@ void handleWiFiReconnection() {
   WiFi.disconnect();
   delay(1000);
   connectWiFi();
+  
+  // Si reconectamos, obtener configuración
+  if (wifiConnected) {
+    requestConfiguration();
+  }
 }
 
 // =============================================================================
@@ -335,6 +408,7 @@ void setupWebServer() {
   server.on("/reset", HTTP_GET, handleReset);
   server.on("/test", HTTP_GET, handleTest);
   server.on("/cancel_timer", HTTP_GET, handleCancelTimer);
+  server.on("/refresh_config", HTTP_GET, handleRefreshConfig);
   
   // 404 handler
   server.onNotFound(handleNotFound);
@@ -389,6 +463,15 @@ void handleCancelTimer() {
     Serial.println("⏹️ Timer de apagado cancelado manualmente");
   }
   String response = createJsonResponse("cancel_timer", relayState);
+  server.send(200, "application/json", response);
+}
+
+void handleRefreshConfig() {
+  Serial.println("🔄 Actualización de configuración solicitada");
+  lastConfigRequest = 0;  // Forzar nueva solicitud
+  requestConfiguration();
+  
+  String response = createJsonResponse("refresh_config", relayState);
   server.send(200, "application/json", response);
 }
 
@@ -481,7 +564,7 @@ void setRelayState(bool state, bool activateTimer) {
   if (state && activateTimer) {
     autoOffActive = true;
     turnOnTime = millis();
-    Serial.println("⏰ Timer de apagado activado (3 segundos)");
+    Serial.println("⏰ Timer de apagado activado (" + String(AUTO_OFF_DELAY/1000.0) + " segundos)");
   } else if (!state) {
     autoOffActive = false;
   }
@@ -532,6 +615,7 @@ void registerWithMaster() {
   Serial.println("📡 Registrando con maestro...");
   
   String url = "http://" + String(masterIP) + ":" + String(masterPort) + "/register?id=" + String(MODULE_ID);
+  url += "&version=4.0";
   
   httpClient.begin(wifiClient, url);
   httpClient.setTimeout(HTTP_TIMEOUT);
@@ -570,6 +654,7 @@ void sendHeartbeat() {
   url += "&heap=" + String(ESP.getFreeHeap());
   url += "&autooff=" + String(autoOffActive ? "1" : "0");
   url += "&autooffcount=" + String(autoOffCount);
+  url += "&configured_delay=" + String(AUTO_OFF_DELAY);  // Enviar delay configurado
   
   httpClient.begin(wifiClient, url);
   httpClient.setTimeout(HTTP_TIMEOUT);
@@ -579,7 +664,7 @@ void sendHeartbeat() {
   if (httpCode == HTTP_CODE_OK) {
     heartbeatCount++;
     failedCommands = 0;
-    Serial.println("💓 Heartbeat #" + String(heartbeatCount) + " enviado");
+    Serial.println("💓 Heartbeat #" + String(heartbeatCount) + " enviado (delay=" + String(AUTO_OFF_DELAY) + "ms)");
   } else {
     failedCommands++;
     Serial.println("⚠ Error heartbeat - HTTP " + String(httpCode));
@@ -588,6 +673,7 @@ void sendHeartbeat() {
     if (failedCommands > 3) {
       Serial.println("🔄 Demasiados fallos, re-registrando...");
       isRegistered = false;
+      configReceived = false;  // También obtener config de nuevo
       failedCommands = 0;
     }
   }
@@ -606,6 +692,8 @@ String createJsonResponse(String command, bool state) {
   json += "\"command\":\"" + command + "\",";
   json += "\"relay_state\":" + String(state ? "true" : "false") + ",";
   json += "\"auto_off_active\":" + String(autoOffActive ? "true" : "false") + ",";
+  json += "\"auto_off_delay\":" + String(AUTO_OFF_DELAY) + ",";
+  json += "\"config_received\":" + String(configReceived ? "true" : "false") + ",";
   
   if (autoOffActive) {
     unsigned long timeLeft = AUTO_OFF_DELAY - (millis() - turnOnTime);
@@ -622,6 +710,8 @@ String generateStatusJson() {
   json += "\"module_id\":" + String(MODULE_ID) + ",";
   json += "\"relay_state\":" + String(relayState ? "true" : "false") + ",";
   json += "\"auto_off_active\":" + String(autoOffActive ? "true" : "false") + ",";
+  json += "\"auto_off_delay\":" + String(AUTO_OFF_DELAY) + ",";
+  json += "\"config_received\":" + String(configReceived ? "true" : "false") + ",";
   
   if (autoOffActive) {
     unsigned long timeLeft = AUTO_OFF_DELAY - (millis() - turnOnTime);
@@ -638,7 +728,8 @@ String generateStatusJson() {
   json += "\"total_commands\":" + String(totalCommands) + ",";
   json += "\"failed_commands\":" + String(failedCommands) + ",";
   json += "\"heartbeats\":" + String(heartbeatCount) + ",";
-  json += "\"reconnects\":" + String(reconnectCount) + "";
+  json += "\"reconnects\":" + String(reconnectCount) + ",";
+  json += "\"config_requests\":" + String(configRequestCount) + "";
   json += "}";
   return json;
 }
@@ -647,8 +738,8 @@ String generateInfoJson() {
   String json = "{";
   json += "\"module\":{";
   json += "\"id\":" + String(MODULE_ID) + ",";
-  json += "\"version\":\"3.0\",";
-  json += "\"features\":[\"auto-off\",\"3-second-timer\",\"gpio0-relay\",\"10w-bulb\"],";
+  json += "\"version\":\"4.0\",";
+  json += "\"features\":[\"auto-off\",\"dynamic-config\",\"gpio0-relay\",\"10w-bulb\"],";
   json += "\"hardware\":\"ESP8266-01S\"";
   json += "},";
   json += "\"network\":{";
@@ -665,7 +756,9 @@ String generateInfoJson() {
   json += "\"flash_size\":" + String(ESP.getFlashChipSize()) + ",";
   json += "\"cpu_freq\":" + String(ESP.getCpuFreqMHz()) + ",";
   json += "\"auto_off_count\":" + String(autoOffCount) + ",";
-  json += "\"relay_pin\":\"GPIO" + String(RELAY_PIN) + "\"";
+  json += "\"relay_pin\":\"GPIO" + String(RELAY_PIN) + "\",";
+  json += "\"configured_delay\":" + String(AUTO_OFF_DELAY) + ",";
+  json += "\"config_source\":\"" + String(configReceived ? "master" : "default") + "\"";
   json += "}";
   json += "}";
   return json;
@@ -703,6 +796,8 @@ String generateWebInterface() {
   html += ".info-label{font-weight:bold;color:#1976D2}";
   html += ".footer{text-align:center;margin-top:30px;color:#666;font-size:0.9em}";
   html += ".pulse{animation:pulse 2s infinite}";
+  html += ".config-status{background:#E8F5E9;padding:10px;border-radius:8px;margin:10px 0;font-size:0.9em}";
+  html += ".config-status.pending{background:#FFF3E0}";
   html += "@keyframes pulse{0%{box-shadow:0 0 0 0 rgba(255,152,0,0.7)}70%{box-shadow:0 0 0 10px rgba(255,152,0,0)}100%{box-shadow:0 0 0 0 rgba(255,152,0,0)}}";
   html += "</style></head><body>";
   
@@ -711,7 +806,16 @@ String generateWebInterface() {
   // Header
   html += "<div class='header'>";
   html += "<div class='module-id'>💡 Foco " + String(MODULE_ID) + "</div>";
-  html += "<div style='color:#666'>Controlador de Foco 10W v3.0</div>";
+  html += "<div style='color:#666'>Controlador de Foco 10W v4.0</div>";
+  html += "</div>";
+  
+  // Estado de configuración
+  html += "<div class='config-status" + String(configReceived ? "" : " pending") + "'>";
+  if (configReceived) {
+    html += "✅ Configuración sincronizada con maestro";
+  } else {
+    html += "⏳ Usando configuración por defecto";
+  }
   html += "</div>";
   
   // Estado actual
@@ -725,7 +829,7 @@ String generateWebInterface() {
   // Información del temporizador
   html += "<div class='timer-info" + String(autoOffActive ? " active pulse" : "") + "'>";
   html += "⏰ APAGADO AUTOMÁTICO ACTIVO";
-  html += "<div class='countdown' id='countdown'>3 segundos</div>";
+  html += "<div class='countdown' id='countdown'>" + String(AUTO_OFF_DELAY/1000.0) + " segundos</div>";
   html += "</div>";
   
   // Controles principales
@@ -743,7 +847,8 @@ String generateWebInterface() {
   if (autoOffActive) {
     html += "<button class='btn warning full' onclick='sendCommand(\"/cancel_timer\")'>⏹️ Cancelar Timer</button>";
   }
-  html += "<button class='btn danger full' onclick='confirmReset()'>🔄 Reiniciar Módulo</button>";
+  html += "<button class='btn' onclick='sendCommand(\"/refresh_config\")'>🔄 Actualizar Config</button>";
+  html += "<button class='btn danger' onclick='confirmReset()'>🔄 Reiniciar</button>";
   html += "</div>";
   
   // Información del sistema
@@ -753,6 +858,7 @@ String generateWebInterface() {
   html += "<div class='info-item'><span class='info-label'>RSSI:</span><span>" + String(WiFi.RSSI()) + " dBm</span></div>";
   html += "<div class='info-item'><span class='info-label'>Uptime:</span><span>" + String((millis() - bootTime)/1000) + " seg</span></div>";
   html += "<div class='info-item'><span class='info-label'>Registrado:</span><span>" + String(isRegistered ? "✅ Sí" : "❌ No") + "</span></div>";
+  html += "<div class='info-item'><span class='info-label'>Auto-off Config:</span><span>" + String(AUTO_OFF_DELAY/1000.0) + "s " + String(configReceived ? "(maestro)" : "(defecto)") + "</span></div>";
   html += "<div class='info-item'><span class='info-label'>Comandos:</span><span>" + String(totalCommands) + "</span></div>";
   html += "<div class='info-item'><span class='info-label'>Auto-off:</span><span>" + String(autoOffCount) + " veces</span></div>";
   html += "<div class='info-item'><span class='info-label'>Heartbeats:</span><span>" + String(heartbeatCount) + "</span></div>";
@@ -762,9 +868,9 @@ String generateWebInterface() {
   
   // Footer
   html += "<div class='footer'>";
-  html += "Sistema Control de Focos v3.0<br>";
+  html += "Sistema Control de Focos v4.0<br>";
   html += "ESP8266-01S • Foco " + String(MODULE_ID) + " (10W)<br>";
-  html += "⏰ Auto-off: 3 segundos<br>";
+  html += "⏰ Auto-off: " + String(AUTO_OFF_DELAY/1000.0) + " segundos" + String(configReceived ? " (configurado)" : " (por defecto)") + "<br>";
   html += "📍 Relay: GPIO0 (con pull-up 10K)";
   html += "</div>";
   
@@ -774,6 +880,7 @@ String generateWebInterface() {
   html += "<script>";
   html += "var autoOffActive = " + String(autoOffActive ? "true" : "false") + ";";
   html += "var turnOnTime = " + String(turnOnTime) + ";";
+  html += "var autoOffDelay = " + String(AUTO_OFF_DELAY) + ";";
   html += "var currentTime = " + String(millis()) + ";";
   html += "var serverOffset = currentTime - Date.now();";
   
@@ -781,9 +888,9 @@ String generateWebInterface() {
   html += "  if (autoOffActive) {";
   html += "    var now = Date.now() + serverOffset;";
   html += "    var elapsed = now - turnOnTime;";
-  html += "    var remaining = Math.max(0, 3000 - elapsed);";
-  html += "    var seconds = Math.ceil(remaining / 1000);";
-  html += "    document.getElementById('countdown').textContent = seconds + ' segundo' + (seconds !== 1 ? 's' : '');";
+  html += "    var remaining = Math.max(0, autoOffDelay - elapsed);";
+  html += "    var seconds = (remaining / 1000).toFixed(1);";
+  html += "    document.getElementById('countdown').textContent = seconds + ' segundos';";
   html += "    if (remaining <= 0) {";
   html += "      setTimeout(() => location.reload(), 500);";
   html += "    }";
