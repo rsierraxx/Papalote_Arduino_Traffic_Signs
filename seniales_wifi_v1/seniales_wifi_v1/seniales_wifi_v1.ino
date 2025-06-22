@@ -155,12 +155,39 @@ void loop() {
   
   if(Button_1_State == HIGH) {
     if (Button_1_State != prevButton_1_State) {
-    Serial.println("=================================");
-    Serial.println("Activo boton 1");
-    Serial.println("=================================");      
+      Serial.println("=================================");
+      Serial.println("Activo boton 1");
+      Serial.println("=================================");      
+
+      int moduleId = 1;
+      Serial.println("============== Boton 1 ===================");
+      Serial.println("moduleId: ");
+      Serial.print(moduleId);
+      
+      if (moduleId >= 1 && moduleId <= MAX_MODULES) {
+        Serial.println("============== Prender LD 1 ===================");
+        Serial.println("moduleId: ");
+        Serial.print(moduleId);        
+        int index = moduleId - 1;
+        bool newState = !modules[index].isOn;
+        bool success = controlModule(moduleId, newState);
+        
+        // client.println("HTTP/1.1 200 OK");
+        // client.println("Content-Type: application/json");
+        // client.println("Connection: close");
+        // client.println();
+        // client.println("{\"status\":\"" + String(success ? "ok" : "error") + "\",\"module\":" + String(moduleId) + ",\"state\":" + String(newState ? "true" : "false") + "}");
+      } else {
+        // client.println("HTTP/1.1 400 Bad Request");
+        // client.println("Connection: close");
+        // client.println();
+        // client.println("{\"error\":\"Invalid module ID\"}");
+      }
+
       digitalWrite(Led_1,HIGH);
       delay(20);
       prevButton_1_State = Button_1_State;
+      
     }
   }else{
     digitalWrite(Led_1,LOW);
@@ -556,6 +583,8 @@ void executeAutoMode() {
 // =============================================================================
 
 void handleWebClients() {
+  // Serial.println("===> handleWebClients <===");
+
   WiFiClient client = server.available();
   if (client) {
     String request = client.readStringUntil('\r');
@@ -619,6 +648,9 @@ void handleToggleRequest(WiFiClient& client, String request) {
   if (idEnd == -1) idEnd = request.length();
   
   int moduleId = request.substring(idStart, idEnd).toInt();
+  Serial.println("============== handleToggleRequest ===================");
+  Serial.println("moduleId: ");
+  Serial.print(moduleId);
   
   if (moduleId >= 1 && moduleId <= MAX_MODULES) {
     int index = moduleId - 1;
