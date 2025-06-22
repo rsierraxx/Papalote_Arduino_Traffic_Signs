@@ -32,6 +32,13 @@ const IPAddress subnet(255, 255, 255, 0);
 #define MODULE_TIMEOUT 120000     // 2 minutos para considerar módulo offline
 #define EFFECT_DELAY_DEFAULT 500  // Delay por defecto para efectos (ms)
 
+// Configuración de los botones físicos
+#define BUTTON1_PIN 2             // Pin digital 2 para botón 1 (Módulo 1)
+#define BUTTON2_PIN 3             // Pin digital 3 para botón 2 (Módulo 2)
+#define BUTTON3_PIN 4             // Pin digital 4 para botón 3 (Módulo 3)
+#define BUTTON_DEBOUNCE 50        // 50ms debounce
+#define AUTO_OFF_DELAY 5000       // 2 segundos para apagado automático
+
 // Puertos
 WiFiServer server(80);
 WiFiServer apiServer(8080);
@@ -64,28 +71,30 @@ unsigned long lastEffectUpdate = 0;
 int effectDelay = EFFECT_DELAY_DEFAULT;
 int effectStep = 0;
 
-// =============================================================================
-// BOTONES
-// =============================================================================
+// Variables para los botones físicos
+struct ButtonState {
+  bool lastState;
+  bool currentState;
+  unsigned long lastDebounceTime;
+  bool pressed;
+};
 
-const int Button_1=1;
-const int Led_1=2;
+ButtonState button1 = {HIGH, HIGH, 0, false};
+ButtonState button2 = {HIGH, HIGH, 0, false};
+ButtonState button3 = {HIGH, HIGH, 0, false};
 
-const int Button_2=3;
-const int Led_2=4;
+// Variables para control temporal de módulos
+struct ModuleTimer {
+  bool autoOffActive;
+  unsigned long turnOnTime;
+  int moduleId;
+};
 
-const int Button_3=5;
-const int Led_3=6;
-
-int Button_1_State = 0;
-int prevButton_1_State = 0;
-
-int Button_2_State = 0;
-int prevButton_2_State = 0;
-
-int Button_3_State = 0;
-int prevButton_3_State = 0;
-// ==================================
+ModuleTimer moduleTimers[3] = {
+  {false, 0, 1},  // Botón 1 → Módulo 1
+  {false, 0, 2},  // Botón 2 → Módulo 2  
+  {false, 0, 3}   // Botón 3 → Módulo 3
+};
 
 // =============================================================================
 // CONFIGURACIÓN INICIAL
@@ -97,6 +106,24 @@ void setup() {
   
   Serial.println("\n=== SISTEMA DE CONTROL DE TIRAS LED ===");
   Serial.println("Inicializando Arduino UNO R4 WiFi como Punto de Acceso...");
+  
+  // Configurar pines de los botones
+  pinMode(BUTTON1_PIN, INPUT_PULLUP);
+  pinMode(BUTTON2_PIN, INPUT_PULLUP);
+  pinMode(BUTTON3_PIN, INPUT_PULLUP);
+  
+  // Leer estados iniciales
+  button1.lastState = digitalRead(BUTTON1_PIN);
+  button1.currentState = button1.lastState;
+  button2.lastState = digitalRead(BUTTON2_PIN);
+  button2.currentState = button2.lastState;
+  button3.lastState = digitalRead(BUTTON3_PIN);
+  button3.currentState = button3.lastState;
+  
+  Serial.println("Botones físicos configurados:");
+  Serial.println("  Botón 1 (Pin " + String(BUTTON1_PIN) + ") → Módulo 1");
+  Serial.println("  Botón 2 (Pin " + String(BUTTON2_PIN) + ") → Módulo 2");
+  Serial.println("  Botón 3 (Pin " + String(BUTTON3_PIN) + ") → Módulo 3");
   
   // Inicializar estructura de módulos
   initializeModules();
@@ -114,16 +141,6 @@ void setup() {
   Serial.println("\n=== SISTEMA LISTO ===");
   printSystemInfo();
   printCommands();
-
-  pinMode(Led_1,OUTPUT);
-  pinMode(Button_1,INPUT);
-  
-  pinMode(Led_2,OUTPUT);
-  pinMode(Button_2,INPUT);
-  
-  pinMode(Led_3,OUTPUT);
-  pinMode(Button_3,INPUT);
-
 }
 
 // =============================================================================
@@ -133,6 +150,12 @@ void setup() {
 void loop() {
   // Procesar comandos serie
   handleSerialCommands();
+  
+  // Manejar botones físicos
+  handlePhysicalButtons();
+  
+  // Manejar temporizadores de módulos
+  handleModuleTimers();
   
   // Manejar conexiones web
   handleWebClients();
@@ -147,78 +170,6 @@ void loop() {
   handleEffects();
   
   delay(10); // Pequeña pausa para estabilidad
-
-  // Funcionalidad de botones
-  Button_1_State = digitalRead(Button_1);
-  Button_2_State = digitalRead(Button_2);
-  Button_3_State = digitalRead(Button_3);
-  
-  if(Button_1_State == HIGH) {
-    if (Button_1_State != prevButton_1_State) {
-      Serial.println("=================================");
-      Serial.println("Activo boton 1");
-      Serial.println("=================================");      
-
-      int moduleId = 1;
-      Serial.println("============== Boton 1 ===================");
-      Serial.println("moduleId: ");
-      Serial.print(moduleId);
-      
-      if (moduleId >= 1 && moduleId <= MAX_MODULES) {
-        Serial.println("============== Prender LD 1 ===================");
-        Serial.println("moduleId: ");
-        Serial.print(moduleId);        
-        int index = moduleId - 1;
-        bool newState = !modules[index].isOn;
-        bool success = controlModule(moduleId, newState);
-        
-        // client.println("HTTP/1.1 200 OK");
-        // client.println("Content-Type: application/json");
-        // client.println("Connection: close");
-        // client.println();
-        // client.println("{\"status\":\"" + String(success ? "ok" : "error") + "\",\"module\":" + String(moduleId) + ",\"state\":" + String(newState ? "true" : "false") + "}");
-      } else {
-        // client.println("HTTP/1.1 400 Bad Request");
-        // client.println("Connection: close");
-        // client.println();
-        // client.println("{\"error\":\"Invalid module ID\"}");
-      }
-
-      digitalWrite(Led_1,HIGH);
-      delay(20);
-      prevButton_1_State = Button_1_State;
-      
-    }
-  }else{
-    digitalWrite(Led_1,LOW);
-    prevButton_1_State = Button_1_State;
-  }
-  
-  
-  if(Button_2_State == HIGH) {
-    if (Button_2_State != prevButton_2_State) {
-      digitalWrite(Led_2,HIGH);
-      delay(20);
-      prevButton_2_State = Button_2_State;
-    }
-  }else{
-    digitalWrite(Led_2,LOW);
-    prevButton_2_State = Button_2_State;
-  }
-  
-  
-  if(Button_3_State == HIGH) {
-    if (Button_3_State != prevButton_3_State) {
-      digitalWrite(Led_3,HIGH);
-      delay(20);
-      prevButton_3_State = Button_3_State;
-    }
-  }else{
-    digitalWrite(Led_3,LOW);
-    prevButton_3_State = Button_3_State;
-  }
-
-  delay(20);   
 }
 
 // =============================================================================
@@ -264,6 +215,135 @@ void initializeModules() {
   }
   registeredModules = 0;
   Serial.println("Estructura de módulos inicializada");
+}
+
+// =============================================================================
+// MANEJO DE LOS BOTONES FÍSICOS
+// =============================================================================
+
+void handlePhysicalButtons() {
+  // Manejar cada botón individualmente
+  handleSingleButton(BUTTON1_PIN, &button1, 0); // Botón 1 → Módulo 1
+  handleSingleButton(BUTTON2_PIN, &button2, 1); // Botón 2 → Módulo 2
+  handleSingleButton(BUTTON3_PIN, &button3, 2); // Botón 3 → Módulo 3
+}
+
+void handleSingleButton(int pin, ButtonState* buttonState, int timerIndex) {
+  // Leer estado actual del botón
+  int reading = digitalRead(pin);
+  
+  // Verificar si el estado cambió (para debounce)
+  if (reading != buttonState->lastState) {
+    buttonState->lastDebounceTime = millis();
+  }
+  
+  // Si ha pasado el tiempo de debounce
+  if ((millis() - buttonState->lastDebounceTime) > BUTTON_DEBOUNCE) {
+    
+    // Si el estado del botón realmente cambió
+    if (reading != buttonState->currentState) {
+      buttonState->currentState = reading;
+      
+      // Botón presionado (LOW porque usamos pull-up)
+      if (buttonState->currentState == LOW) {
+        buttonState->pressed = true;
+        int moduleId = moduleTimers[timerIndex].moduleId;
+        Serial.println("🔘 Botón " + String(timerIndex + 1) + " presionado → Activando módulo " + String(moduleId));
+        
+        // Activar módulo correspondiente
+        activateModuleWithTimer(moduleId, timerIndex);
+      }
+      
+      // Botón liberado
+      else if (buttonState->pressed) {
+        buttonState->pressed = false;
+        Serial.println("🔘 Botón " + String(timerIndex + 1) + " liberado");
+      }
+    }
+  }
+  
+  buttonState->lastState = reading;
+}
+
+void activateModuleWithTimer(int moduleId, int timerIndex) {
+  // Verificar que el módulo esté online
+  if (!modules[moduleId - 1].isOnline) {
+    Serial.println("❌ Módulo " + String(moduleId) + " no está online");
+    return;
+  }
+  
+  // Encender el módulo
+  bool success = controlModule(moduleId, true);
+  
+  if (success) {
+    // Configurar temporizador para apagado automático
+    moduleTimers[timerIndex].autoOffActive = true;
+    moduleTimers[timerIndex].turnOnTime = millis();
+    
+    Serial.println("✅ Módulo " + String(moduleId) + " encendido");
+    Serial.println("⏰ Apagado automático en " + String(AUTO_OFF_DELAY / 1000) + " segundos");
+  } else {
+    Serial.println("❌ Error al encender módulo " + String(moduleId));
+  }
+}
+
+void handleModuleTimers() {
+  unsigned long currentTime = millis();
+  
+  // Verificar cada temporizador
+  for (int i = 0; i < 3; i++) {
+    if (moduleTimers[i].autoOffActive) {
+      // Verificar si ha pasado el tiempo de espera
+      if (currentTime - moduleTimers[i].turnOnTime >= AUTO_OFF_DELAY) {
+        int moduleId = moduleTimers[i].moduleId;
+        
+        // Apagar el módulo
+        bool success = controlModule(moduleId, false);
+        
+        if (success) {
+          Serial.println("⏰ Módulo " + String(moduleId) + " apagado automáticamente");
+        } else {
+          Serial.println("❌ Error al apagar módulo " + String(moduleId) + " automáticamente");
+        }
+        
+        // Desactivar temporizador
+        moduleTimers[i].autoOffActive = false;
+      } else {
+        // Mostrar cuenta regresiva cada segundo
+        unsigned long timeLeft = AUTO_OFF_DELAY - (currentTime - moduleTimers[i].turnOnTime);
+        static unsigned long lastCountdown[3] = {0, 0, 0};
+        
+        if (currentTime - lastCountdown[i] >= 1000) {
+          lastCountdown[i] = currentTime;
+          int secondsLeft = timeLeft / 1000;
+          if (secondsLeft > 0) {
+            Serial.println("⏳ Módulo " + String(moduleTimers[i].moduleId) + " se apagará en " + String(secondsLeft) + " segundos");
+          }
+        }
+      }
+    }
+  }
+}
+
+// Función para cancelar temporizadores (opcional)
+void cancelModuleTimer(int moduleId) {
+  for (int i = 0; i < 3; i++) {
+    if (moduleTimers[i].moduleId == moduleId && moduleTimers[i].autoOffActive) {
+      moduleTimers[i].autoOffActive = false;
+      Serial.println("⏹️ Temporizador cancelado para módulo " + String(moduleId));
+      break;
+    }
+  }
+}
+
+// Función para verificar si un módulo tiene temporizador activo
+bool hasActiveTimer(int moduleId) {
+  for (int i = 0; i < 3; i++) {
+    if (moduleTimers[i].moduleId == moduleId && moduleTimers[i].autoOffActive) {
+      return true;
+    }
+  }
+  return false;
 }
 
 // =============================================================================
@@ -368,6 +448,11 @@ bool controlModule(int moduleId, bool state) {
   if (!modules[index].isOnline) {
     Serial.println("Módulo " + String(moduleId) + " no está online");
     return false;
+  }
+  
+  // Si se está apagando un módulo que tiene temporizador activo, cancelarlo
+  if (!state && hasActiveTimer(moduleId)) {
+    cancelModuleTimer(moduleId);
   }
   
   WiFiClient client;
@@ -583,8 +668,6 @@ void executeAutoMode() {
 // =============================================================================
 
 void handleWebClients() {
-  // Serial.println("===> handleWebClients <===");
-
   WiFiClient client = server.available();
   if (client) {
     String request = client.readStringUntil('\r');
@@ -648,9 +731,6 @@ void handleToggleRequest(WiFiClient& client, String request) {
   if (idEnd == -1) idEnd = request.length();
   
   int moduleId = request.substring(idStart, idEnd).toInt();
-  Serial.println("============== handleToggleRequest ===================");
-  Serial.println("moduleId: ");
-  Serial.print(moduleId);
   
   if (moduleId >= 1 && moduleId <= MAX_MODULES) {
     int index = moduleId - 1;
@@ -927,6 +1007,15 @@ void printSystemStatus() {
   Serial.println("Efecto actual: " + currentEffect);
   Serial.println("Modo automático: " + String(autoMode ? "ON" : "OFF"));
   Serial.println("Uptime: " + String(millis()/1000) + " segundos");
+  
+  // Mostrar estado de temporizadores activos
+  for (int i = 0; i < 3; i++) {
+    if (moduleTimers[i].autoOffActive) {
+      unsigned long timeLeft = AUTO_OFF_DELAY - (millis() - moduleTimers[i].turnOnTime);
+      Serial.println("Timer activo - Módulo " + String(moduleTimers[i].moduleId) + ": " + String(timeLeft/1000) + "s restantes");
+    }
+  }
+  
   Serial.println("=========================\n");
 }
 
@@ -953,11 +1042,17 @@ void printSystemInfo() {
   Serial.println("Puerto Web: 80");
   Serial.println("Puerto API: 8080");
   Serial.println("Máximo módulos: " + String(MAX_MODULES));
+  Serial.println("Botones físicos:");
+  Serial.println("  Botón 1: Pin " + String(BUTTON1_PIN) + " → Módulo 1");
+  Serial.println("  Botón 2: Pin " + String(BUTTON2_PIN) + " → Módulo 2");
+  Serial.println("  Botón 3: Pin " + String(BUTTON3_PIN) + " → Módulo 3");
+  Serial.println("Auto-off: " + String(AUTO_OFF_DELAY / 1000) + " segundos");
   Serial.println("==============================\n");
 }
 
 void printCommands() {
   Serial.println("\n=== COMANDOS DISPONIBLES ===");
+  Serial.println("COMANDOS SERIE:");
   Serial.println("on [1-12]     - Encender tira específica");
   Serial.println("off [1-12]    - Apagar tira específica");
   Serial.println("all_on        - Encender todas las tiras");
@@ -973,11 +1068,22 @@ void printCommands() {
   Serial.println("modules       - Estado de módulos");
   Serial.println("reset         - Reiniciar sistema");
   Serial.println("help          - Mostrar esta ayuda");
+  Serial.println("");
+  Serial.println("BOTONES FÍSICOS:");
+  Serial.println("Botón 1 (Pin " + String(BUTTON1_PIN) + ") → Módulo 1 (ON 2s → OFF)");
+  Serial.println("Botón 2 (Pin " + String(BUTTON2_PIN) + ") → Módulo 2 (ON 2s → OFF)");
+  Serial.println("Botón 3 (Pin " + String(BUTTON3_PIN) + ") → Módulo 3 (ON 2s → OFF)");
   Serial.println("============================\n");
 }
 
 void resetSystem() {
   Serial.println("Reiniciando sistema...");
+  
+  // Cancelar todos los temporizadores activos
+  for (int i = 0; i < 3; i++) {
+    moduleTimers[i].autoOffActive = false;
+  }
+  
   initializeModules();
   stopEffect();
   autoMode = false;
