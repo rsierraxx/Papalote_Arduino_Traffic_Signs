@@ -37,7 +37,8 @@ const IPAddress subnet(255, 255, 255, 0);
 #define BUTTON2_PIN 3             // Pin digital 3 para botón 2 (Módulo 2)
 #define BUTTON3_PIN 4             // Pin digital 4 para botón 3 (Módulo 3)
 #define BUTTON_DEBOUNCE 50        // 50ms debounce
-#define AUTO_OFF_DELAY 5000       // 2 segundos para apagado automático
+#define AUTO_OFF_DELAY 2000       // 2 segundos para apagado automático
+#define HTTP_TIMEOUT 1000        // 1 segundo timeout para HTTP (más rápido)
 
 // Puertos
 WiFiServer server(80);
@@ -272,15 +273,21 @@ void activateModuleWithTimer(int moduleId, int timerIndex) {
     return;
   }
   
-  // Encender el módulo
-  bool success = controlModule(moduleId, true);
+  // Si ya hay un temporizador activo para este módulo, cancelarlo
+  if (moduleTimers[timerIndex].autoOffActive) {
+    Serial.println("⏹️ Cancelando temporizador previo para módulo " + String(moduleId));
+    moduleTimers[timerIndex].autoOffActive = false;
+  }
+  
+  // Encender el módulo usando función rápida
+  bool success = controlModuleFast(moduleId, true);
   
   if (success) {
     // Configurar temporizador para apagado automático
     moduleTimers[timerIndex].autoOffActive = true;
     moduleTimers[timerIndex].turnOnTime = millis();
     
-    Serial.println("✅ Módulo " + String(moduleId) + " encendido");
+    Serial.println("✅ Módulo " + String(moduleId) + " encendido (rápido)");
     Serial.println("⏰ Apagado automático en " + String(AUTO_OFF_DELAY / 1000) + " segundos");
   } else {
     Serial.println("❌ Error al encender módulo " + String(moduleId));
@@ -293,34 +300,27 @@ void handleModuleTimers() {
   // Verificar cada temporizador
   for (int i = 0; i < 3; i++) {
     if (moduleTimers[i].autoOffActive) {
+      unsigned long elapsedTime = currentTime - moduleTimers[i].turnOnTime;
+      
       // Verificar si ha pasado el tiempo de espera
-      if (currentTime - moduleTimers[i].turnOnTime >= AUTO_OFF_DELAY) {
+      if (elapsedTime >= AUTO_OFF_DELAY) {
         int moduleId = moduleTimers[i].moduleId;
         
-        // Apagar el módulo
-        bool success = controlModule(moduleId, false);
+        // Desactivar temporizador ANTES de enviar comando
+        moduleTimers[i].autoOffActive = false;
+        
+        Serial.println("⏰ Tiempo cumplido - Apagando módulo " + String(moduleId));
+        
+        // Apagar el módulo usando función rápida
+        bool success = controlModuleFast(moduleId, false);
         
         if (success) {
-          Serial.println("⏰ Módulo " + String(moduleId) + " apagado automáticamente");
+          Serial.println("⏰ Módulo " + String(moduleId) + " apagado automáticamente (rápido)");
         } else {
           Serial.println("❌ Error al apagar módulo " + String(moduleId) + " automáticamente");
         }
-        
-        // Desactivar temporizador
-        moduleTimers[i].autoOffActive = false;
-      } else {
-        // Mostrar cuenta regresiva cada segundo
-        unsigned long timeLeft = AUTO_OFF_DELAY - (currentTime - moduleTimers[i].turnOnTime);
-        static unsigned long lastCountdown[3] = {0, 0, 0};
-        
-        if (currentTime - lastCountdown[i] >= 1000) {
-          lastCountdown[i] = currentTime;
-          int secondsLeft = timeLeft / 1000;
-          if (secondsLeft > 0) {
-            Serial.println("⏳ Módulo " + String(moduleTimers[i].moduleId) + " se apagará en " + String(secondsLeft) + " segundos");
-          }
-        }
       }
+      // Remover cuenta regresiva para evitar spam en consola
     }
   }
 }
@@ -434,6 +434,40 @@ void processCommand(String cmd) {
   }
 }
 
+// Función rápida para control de módulos sin esperar respuesta completa
+bool controlModuleFast(int moduleId, bool state) {
+  if (moduleId < 1 || moduleId > MAX_MODULES) {
+    return false;
+  }
+  
+  int index = moduleId - 1;
+  if (!modules[index].isOnline) {
+    return false;
+  }
+  
+  WiFiClient client;
+  
+  // Timeout muy corto para conexión rápida
+  if (client.connect(modules[index].ip, 80)) {
+    String httpRequest = "GET ";
+    httpRequest += (state ? "/on" : "/off");
+    httpRequest += " HTTP/1.1";
+    client.println(httpRequest);
+    client.println("Host: " + modules[index].ip.toString());
+    client.println("Connection: close");
+    client.println();
+    
+    // No esperar respuesta, enviar y cerrar inmediatamente
+    client.stop();
+    
+    // Actualizar estado local
+    modules[index].isOn = state;
+    return true;
+  }
+  
+  return false;
+}
+
 // =============================================================================
 // CONTROL DE MÓDULOS
 // =============================================================================
@@ -450,13 +484,10 @@ bool controlModule(int moduleId, bool state) {
     return false;
   }
   
-  // Si se está apagando un módulo que tiene temporizador activo, cancelarlo
-  if (!state && hasActiveTimer(moduleId)) {
-    cancelModuleTimer(moduleId);
-  }
-  
   WiFiClient client;
-  String url = "http://" + modules[index].ip.toString() + "/" + (state ? "on" : "off");
+  
+  // Configurar timeout más corto para conexión
+  client.setTimeout(HTTP_TIMEOUT);
   
   if (client.connect(modules[index].ip, 80)) {
     String httpRequest = "GET ";
@@ -467,8 +498,8 @@ bool controlModule(int moduleId, bool state) {
     client.println("Connection: close");
     client.println();
     
-    // Esperar respuesta
-    unsigned long timeout = millis() + 3000;
+    // Timeout más corto para respuesta
+    unsigned long timeout = millis() + HTTP_TIMEOUT;
     while (client.available() == 0 && millis() < timeout) {
       delay(10);
     }
@@ -477,6 +508,9 @@ bool controlModule(int moduleId, bool state) {
     if (client.available()) {
       String response = client.readString();
       success = response.indexOf("200 OK") != -1;
+    } else {
+      // Si no hay respuesta, asumir éxito para módulos que no responden rápido
+      success = true;
     }
     
     client.stop();
