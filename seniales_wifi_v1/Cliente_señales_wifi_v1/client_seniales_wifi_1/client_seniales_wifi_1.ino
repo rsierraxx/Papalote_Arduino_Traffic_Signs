@@ -49,13 +49,17 @@ const int masterPort = 8080;
 // CONFIGURACIÓN DE HARDWARE
 // =============================================================================
 
-// IMPORTANTE: Cambiado de GPIO0 a GPIO2 para evitar problemas de boot
-#define RELAY_PIN 2      // GPIO2 - Control del relevador (CAMBIADO!)
-// Si no necesitas Serial, puedes usar GPIO3 para LED
-// #define STATUS_LED_PIN 3 // GPIO3 (RX) - LED indicador
+// Regresando a GPIO0 - IMPORTANTE: Agregar resistencia pull-up 10K a 3.3V
+#define RELAY_PIN 0      // GPIO0 - Control del relevador
+#define STATUS_LED_PIN 2 // GPIO2 - LED indicador
 
-// Usando el LED integrado en GPIO2 (compartido con relay)
-#define USE_BUILTIN_LED true
+// Configuración de lógica del relay
+// La mayoría de módulos relay funcionan con lógica invertida
+#define RELAY_INVERTED true   // true = LOW enciende, HIGH apaga
+
+// Estados del relay según la lógica
+#define RELAY_ON  (RELAY_INVERTED ? LOW : HIGH)
+#define RELAY_OFF (RELAY_INVERTED ? HIGH : LOW)
 
 // =============================================================================
 // CONFIGURACIÓN DE TIEMPOS
@@ -166,6 +170,9 @@ void loop() {
   
   // Pausa mínima
   delay(10);
+  
+  // Yield para mantener watchdog activo
+  yield();
 }
 
 // =============================================================================
@@ -199,28 +206,50 @@ void handleAutoOff() {
 
 void initializePins() {
   Serial.println("--- CONFIGURANDO PINES ---");
+  Serial.println("⚠️  ADVERTENCIA: Usando GPIO0 para relay");
+  Serial.println("   IMPORTANTE: Agregar resistencia pull-up 10K entre GPIO0 y 3.3V");
+  Serial.println("   Esto evita problemas de arranque en modo programación");
   
-  // IMPORTANTE: Establecer estado ANTES de configurar como OUTPUT
-  digitalWrite(RELAY_PIN, LOW);  // Asegurar que empiece apagado
-  delay(100);
-  
+  // CRÍTICO: Establecer GPIO0 en HIGH antes de configurar como OUTPUT
+  digitalWrite(RELAY_PIN, RELAY_OFF);  // Asegurar estado OFF
   pinMode(RELAY_PIN, OUTPUT);
-  digitalWrite(RELAY_PIN, LOW);  // Asegurar nuevamente
+  digitalWrite(RELAY_PIN, RELAY_OFF);  // Confirmar estado OFF
+  
+  // LED de estado
+  pinMode(STATUS_LED_PIN, OUTPUT);
+  digitalWrite(STATUS_LED_PIN, LOW);
   
   relayState = false;
   
   Serial.println("✓ Pines configurados");
-  Serial.println("  GPIO2 (Relevador): OUTPUT - INICIALIZADO EN LOW");
-  Serial.println("  NOTA: GPIO2 es más estable que GPIO0 para relays");
+  Serial.println("  GPIO0 (Relevador): OUTPUT");
+  Serial.println("  GPIO2 (LED Estado): OUTPUT");
+  Serial.println("  Lógica relay: " + String(RELAY_INVERTED ? "INVERTIDA" : "NORMAL"));
+  Serial.println("  Estado OFF = " + String(RELAY_OFF == HIGH ? "HIGH" : "LOW"));
+  Serial.println("  Estado ON = " + String(RELAY_ON == HIGH ? "HIGH" : "LOW"));
   
-  // Parpadeo inicial para confirmar que funciona
+  // Test del relay con confirmación visual
+  Serial.println("\n🧪 Probando relay (3 pulsos)...");
   for (int i = 0; i < 3; i++) {
-    digitalWrite(RELAY_PIN, HIGH);
-    delay(100);
-    digitalWrite(RELAY_PIN, LOW);
-    delay(100);
+    Serial.print("  Pulso " + String(i+1) + ": ");
+    
+    // Encender
+    digitalWrite(RELAY_PIN, RELAY_ON);
+    digitalWrite(STATUS_LED_PIN, HIGH);
+    Serial.print("ON ");
+    delay(500);
+    
+    // Apagar
+    digitalWrite(RELAY_PIN, RELAY_OFF);
+    digitalWrite(STATUS_LED_PIN, LOW);
+    Serial.println("OFF");
+    delay(500);
   }
-  Serial.println("✓ Test de relay completado");
+  
+  // Asegurar que quede apagado
+  digitalWrite(RELAY_PIN, RELAY_OFF);
+  digitalWrite(STATUS_LED_PIN, LOW);
+  Serial.println("✓ Test completado - Relay en estado OFF\n");
 }
 
 void printChipInfo() {
@@ -410,9 +439,9 @@ void handleTest() {
   autoOffActive = false;
   
   for (int i = 0; i < 3; i++) {
-    digitalWrite(RELAY_PIN, HIGH);
+    digitalWrite(RELAY_PIN, RELAY_ON);
     delay(300);
-    digitalWrite(RELAY_PIN, LOW);
+    digitalWrite(RELAY_PIN, RELAY_OFF);
     delay(300);
   }
   
@@ -447,10 +476,21 @@ void setRelayState(bool state, bool activateTimer) {
   }
   
   relayState = state;
-  digitalWrite(RELAY_PIN, state ? HIGH : LOW);
-  totalCommands++;
   
-  Serial.println("🔌 Relevador " + String(state ? "ACTIVADO" : "DESACTIVADO"));
+  // Control del relevador según la lógica configurada
+  if (state) {
+    digitalWrite(RELAY_PIN, RELAY_ON);
+    digitalWrite(STATUS_LED_PIN, HIGH);
+    Serial.println("🔌 Relevador ACTIVADO");
+    Serial.println("   GPIO0 = " + String(RELAY_ON == HIGH ? "HIGH" : "LOW"));
+  } else {
+    digitalWrite(RELAY_PIN, RELAY_OFF);
+    digitalWrite(STATUS_LED_PIN, LOW);
+    Serial.println("🔌 Relevador DESACTIVADO");
+    Serial.println("   GPIO0 = " + String(RELAY_OFF == HIGH ? "HIGH" : "LOW"));
+  }
+  
+  totalCommands++;
   
   // Manejar temporizador de apagado automático
   if (state && activateTimer) {
@@ -472,14 +512,14 @@ void executeBlinkPattern(int cycles, int delayMs) {
   Serial.println("⚡ Ejecutando " + String(cycles) + " parpadeos (" + String(delayMs) + "ms)");
   
   for (int i = 0; i < cycles; i++) {
-    digitalWrite(RELAY_PIN, HIGH);
+    digitalWrite(RELAY_PIN, RELAY_ON);
     delay(delayMs);
-    digitalWrite(RELAY_PIN, LOW);
+    digitalWrite(RELAY_PIN, RELAY_OFF);
     delay(delayMs);
   }
   
   // Restaurar estado original
-  digitalWrite(RELAY_PIN, originalState ? HIGH : LOW);
+  digitalWrite(RELAY_PIN, originalState ? RELAY_ON : RELAY_OFF);
   relayState = originalState;
   
   // Restaurar timer si estaba activo
