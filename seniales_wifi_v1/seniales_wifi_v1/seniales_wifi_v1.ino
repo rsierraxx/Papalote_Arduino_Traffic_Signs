@@ -49,6 +49,17 @@ unsigned long AUTO_OFF_DELAY = 3000;  // Tiempo de apagado automático en ms (3 
 #define BUTTON_DEBOUNCE 50        // 50ms debounce
 #define HTTP_TIMEOUT 1000         // 1 segundo timeout para HTTP (más rápido)
 
+// Configuración de los LEDs indicadores
+#define LED1_PIN 5                // Pin digital 5 para LED indicador botón 1
+#define LED2_PIN 6                // Pin digital 6 para LED indicador botón 2
+#define LED3_PIN 7                // Pin digital 7 para LED indicador botón 3
+#define LED_AUTO_OFF_DELAY 3000   // 3 segundos para apagar LED automáticamente
+
+// Configuración de lógica invertida para LEDs (ajustar según tu hardware)
+#define LED_INVERTED true         // true = LOW enciende, HIGH apaga
+#define LED_ON  (LED_INVERTED ? LOW : HIGH)
+#define LED_OFF (LED_INVERTED ? HIGH : LOW)
+
 // Puertos
 WiFiServer server(80);
 WiFiServer apiServer(8080);
@@ -97,6 +108,16 @@ ButtonState button1 = {HIGH, HIGH, 0, false, 0, false};
 ButtonState button2 = {HIGH, HIGH, 0, false, 0, false};
 ButtonState button3 = {HIGH, HIGH, 0, false, 0, false};
 
+// Variables para los LEDs indicadores
+struct LedState {
+  bool isOn;
+  unsigned long turnOnTime;
+};
+
+LedState led1 = {false, 0};
+LedState led2 = {false, 0};
+LedState led3 = {false, 0};
+
 // Tiempo mínimo entre activaciones (ms) - ahora dinámico basado en AUTO_OFF_DELAY
 unsigned long getMinActivationInterval() {
   return AUTO_OFF_DELAY + 500;  // AUTO_OFF_DELAY + 500ms de margen
@@ -122,6 +143,21 @@ void setup() {
   pinMode(BUTTON2_PIN, INPUT_PULLUP);
   pinMode(BUTTON3_PIN, INPUT_PULLUP);
   
+  // Configurar pines de los LEDs indicadores
+  pinMode(LED1_PIN, OUTPUT);
+  pinMode(LED2_PIN, OUTPUT);
+  pinMode(LED3_PIN, OUTPUT);
+  
+  // Asegurar que los LEDs estén apagados al inicio
+  digitalWrite(LED1_PIN, LED_OFF);
+  digitalWrite(LED2_PIN, LED_OFF);
+  digitalWrite(LED3_PIN, LED_OFF);
+  
+  Serial.println("\nLEDs indicadores configurados:");
+  Serial.println("  Lógica: " + String(LED_INVERTED ? "INVERTIDA" : "NORMAL"));
+  Serial.println("  Estado ON = " + String(LED_ON == HIGH ? "HIGH" : "LOW"));
+  Serial.println("  Estado OFF = " + String(LED_OFF == HIGH ? "HIGH" : "LOW"));
+  
   // Leer estados iniciales
   button1.lastState = digitalRead(BUTTON1_PIN);
   button1.currentState = button1.lastState;
@@ -139,9 +175,10 @@ void setup() {
   button3.isProcessing = false;
   
   Serial.println("\nBotones físicos configurados:");
-  Serial.println("  Botón 1 (Pin " + String(BUTTON1_PIN) + ") → Módulo 1");
-  Serial.println("  Botón 2 (Pin " + String(BUTTON2_PIN) + ") → Módulo 2");
-  Serial.println("  Botón 3 (Pin " + String(BUTTON3_PIN) + ") → Módulo 3");
+  Serial.println("  Botón 1 (Pin " + String(BUTTON1_PIN) + ") → Módulo 1 → LED (Pin " + String(LED1_PIN) + ")");
+  Serial.println("  Botón 2 (Pin " + String(BUTTON2_PIN) + ") → Módulo 2 → LED (Pin " + String(LED2_PIN) + ")");
+  Serial.println("  Botón 3 (Pin " + String(BUTTON3_PIN) + ") → Módulo 3 → LED (Pin " + String(LED3_PIN) + ")");
+  Serial.println("  LEDs indicadores: Se apagan automáticamente después de 3 segundos");
   
   // Inicializar estructura de módulos
   initializeModules();
@@ -171,6 +208,9 @@ void loop() {
   
   // Manejar botones físicos
   handlePhysicalButtons();
+  
+  // Manejar apagado automático de LEDs
+  handleLedAutoOff();
   
   // Manejar conexiones web
   handleWebClients();
@@ -240,12 +280,12 @@ void initializeModules() {
 
 void handlePhysicalButtons() {
   // Manejar cada botón individualmente
-  handleSingleButton(BUTTON1_PIN, &button1, 1); // Botón 1 → Módulo 1
-  handleSingleButton(BUTTON2_PIN, &button2, 2); // Botón 2 → Módulo 2
-  handleSingleButton(BUTTON3_PIN, &button3, 3); // Botón 3 → Módulo 3
+  handleSingleButton(BUTTON1_PIN, &button1, 1, &led1, LED1_PIN);
+  handleSingleButton(BUTTON2_PIN, &button2, 2, &led2, LED2_PIN);
+  handleSingleButton(BUTTON3_PIN, &button3, 3, &led3, LED3_PIN);
 }
 
-void handleSingleButton(int pin, ButtonState* buttonState, int moduleId) {
+void handleSingleButton(int pin, ButtonState* buttonState, int moduleId, LedState* ledState, int ledPin) {
   // Leer estado actual del botón
   int reading = digitalRead(pin);
   
@@ -265,6 +305,12 @@ void handleSingleButton(int pin, ButtonState* buttonState, int moduleId) {
       if (buttonState->currentState == LOW && !buttonState->isProcessing) {
         buttonState->pressed = true;
         
+        // Encender el LED indicador
+        digitalWrite(ledPin, LED_ON);
+        ledState->isOn = true;
+        ledState->turnOnTime = millis();
+        Serial.println("💡 LED " + String(moduleId) + " encendido");
+        
         // Verificar si ha pasado suficiente tiempo desde la última activación
         unsigned long currentTime = millis();
         unsigned long timeSinceLastActivation = currentTime - buttonState->lastActivationTime;
@@ -274,6 +320,9 @@ void handleSingleButton(int pin, ButtonState* buttonState, int moduleId) {
           unsigned long timeToWait = (minInterval - timeSinceLastActivation) / 1000;
           Serial.println("⏳ Botón " + String(moduleId) + " - Espera " + String(timeToWait) + "s más");
           Serial.println("   (El módulo necesita completar su ciclo de " + String(AUTO_OFF_DELAY/1000.0) + "s)");
+          // Apagar el LED ya que no se procesará el comando
+          digitalWrite(ledPin, LED_OFF);
+          ledState->isOn = false;
           return;
         }
         
@@ -282,6 +331,9 @@ void handleSingleButton(int pin, ButtonState* buttonState, int moduleId) {
         // Verificar que el módulo esté online
         if (!modules[moduleId - 1].isOnline) {
           Serial.println("❌ Módulo " + String(moduleId) + " no está online");
+          // Apagar el LED ya que no se procesará el comando
+          digitalWrite(ledPin, LED_OFF);
+          ledState->isOn = false;
           return;
         }
         
@@ -297,7 +349,9 @@ void handleSingleButton(int pin, ButtonState* buttonState, int moduleId) {
           Serial.println("⏰ El módulo se apagará automáticamente en " + String(AUTO_OFF_DELAY/1000.0) + " segundos");
         } else {
           Serial.println("❌ Error al encender módulo " + String(moduleId));
-          // Si falla, permitir reintento más rápido
+          // Si falla, apagar el LED y permitir reintento más rápido
+          digitalWrite(ledPin, LED_OFF);
+          ledState->isOn = false;
           buttonState->lastActivationTime = currentTime - (minInterval / 2);
         }
         
@@ -315,6 +369,35 @@ void handleSingleButton(int pin, ButtonState* buttonState, int moduleId) {
   }
   
   buttonState->lastState = reading;
+}
+
+// =============================================================================
+// MANEJO DE APAGADO AUTOMÁTICO DE LEDs
+// =============================================================================
+
+void handleLedAutoOff() {
+  unsigned long currentTime = millis();
+  
+  // Verificar LED 1
+  if (led1.isOn && (currentTime - led1.turnOnTime >= LED_AUTO_OFF_DELAY)) {
+    digitalWrite(LED1_PIN, LED_OFF);
+    led1.isOn = false;
+    Serial.println("💡 LED 1 apagado automáticamente");
+  }
+  
+  // Verificar LED 2
+  if (led2.isOn && (currentTime - led2.turnOnTime >= LED_AUTO_OFF_DELAY)) {
+    digitalWrite(LED2_PIN, LED_OFF);
+    led2.isOn = false;
+    Serial.println("💡 LED 2 apagado automáticamente");
+  }
+  
+  // Verificar LED 3
+  if (led3.isOn && (currentTime - led3.turnOnTime >= LED_AUTO_OFF_DELAY)) {
+    digitalWrite(LED3_PIN, LED_OFF);
+    led3.isOn = false;
+    Serial.println("💡 LED 3 apagado automáticamente");
+  }
 }
 
 // =============================================================================
@@ -1239,9 +1322,12 @@ void printSystemInfo() {
   Serial.println("Puerto API: 8080");
   Serial.println("Máximo módulos: " + String(MAX_MODULES));
   Serial.println("\nBotones físicos:");
-  Serial.println("  Botón 1: Pin " + String(BUTTON1_PIN) + " → Módulo 1");
-  Serial.println("  Botón 2: Pin " + String(BUTTON2_PIN) + " → Módulo 2");
-  Serial.println("  Botón 3: Pin " + String(BUTTON3_PIN) + " → Módulo 3");
+  Serial.println("  Botón 1: Pin " + String(BUTTON1_PIN) + " → Módulo 1 → LED Pin " + String(LED1_PIN));
+  Serial.println("  Botón 2: Pin " + String(BUTTON2_PIN) + " → Módulo 2 → LED Pin " + String(LED2_PIN));
+  Serial.println("  Botón 3: Pin " + String(BUTTON3_PIN) + " → Módulo 3 → LED Pin " + String(LED3_PIN));
+  Serial.println("\nLEDs indicadores:");
+  Serial.println("  Apagado automático: 3 segundos");
+  Serial.println("  Función: Confirmar presión de botón");
   Serial.println("\nConfiguración de clientes ESP8266:");
   Serial.println("  Pin de relay: GPIO0 (con resistencia pull-up 10K)");
   Serial.println("  Control de focos: 10W por módulo");
@@ -1272,12 +1358,13 @@ void printCommands() {
   Serial.println("help          - Mostrar esta ayuda");
   Serial.println("");
   Serial.println("BOTONES FÍSICOS:");
-  Serial.println("Botón 1 (Pin " + String(BUTTON1_PIN) + ") → Módulo 1");
-  Serial.println("Botón 2 (Pin " + String(BUTTON2_PIN) + ") → Módulo 2");
-  Serial.println("Botón 3 (Pin " + String(BUTTON3_PIN) + ") → Módulo 3");
+  Serial.println("Botón 1 (Pin " + String(BUTTON1_PIN) + ") → Módulo 1 → LED Pin " + String(LED1_PIN));
+  Serial.println("Botón 2 (Pin " + String(BUTTON2_PIN) + ") → Módulo 2 → LED Pin " + String(LED2_PIN));
+  Serial.println("Botón 3 (Pin " + String(BUTTON3_PIN) + ") → Módulo 3 → LED Pin " + String(LED3_PIN));
   Serial.println("");
   Serial.println("CONFIGURACIÓN:");
   Serial.println("Los módulos se apagarán automáticamente después de " + String(AUTO_OFF_DELAY/1000.0) + " segundos");
+  Serial.println("Los LEDs indicadores se apagan automáticamente después de 3 segundos");
   Serial.println("============================\n");
 }
 
