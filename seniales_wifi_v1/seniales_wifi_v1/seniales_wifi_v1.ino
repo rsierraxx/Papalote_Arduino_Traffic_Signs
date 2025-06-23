@@ -1347,7 +1347,7 @@ void activateModuleGroup(const int* moduleList) {
     int moduleId = moduleList[i];
     
     if (modules[moduleId - 1].isOnline) {
-      bool success = controlModule(moduleId, true);
+      bool success = controlModuleFast(moduleId, true);  // <-- USAR controlModuleFast
       if (success) {
         anySuccess = true;
         Serial.println("  ✅ Módulo " + String(moduleId) + " encendido");
