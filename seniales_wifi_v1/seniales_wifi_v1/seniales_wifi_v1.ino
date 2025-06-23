@@ -67,7 +67,7 @@ unsigned long AUTO_OFF_DELAY = 3000;  // Tiempo de apagado automático en ms (3 
 // Formato: lista de IDs de módulos terminada en 0
 // Ejemplo: {1, 3, 5, 0} activa los módulos 1, 3 y 5
 
-const int BUTTON1_MODULES[] = {5,6,7,8,9,10,11,12};           // Botón 1 activa solo módulo 1
+const int BUTTON1_MODULES[] = {12, 0};           // Botón 1 activa solo módulo 1
 const int BUTTON2_MODULES[] = {2, 0};           // Botón 2 activa solo módulo 2  
 const int BUTTON3_MODULES[] = {3, 4, 5, 0};     // Botón 3 activa módulos 3, 4 y 5
 
@@ -484,6 +484,21 @@ void processCommand(String cmd) {
     } else {
       Serial.println("Delay inválido (1000-60000ms)");
     }
+  }
+  else if (cmd == "button_group_1") {
+    // Activar grupo 1 (mismos módulos que botón 1)
+    Serial.println("🎮 Comando remoto: Activando grupo 1");
+    activateModuleGroup(BUTTON1_MODULES);
+  }
+  else if (cmd == "button_group_2") {
+    // Activar grupo 2 (mismos módulos que botón 2)
+    Serial.println("🎮 Comando remoto: Activando grupo 2");
+    activateModuleGroup(BUTTON2_MODULES);
+  }
+  else if (cmd == "button_group_3") {
+    // Activar grupo 3 (mismos módulos que botón 3)
+    Serial.println("🎮 Comando remoto: Activando grupo 3");
+    activateModuleGroup(BUTTON3_MODULES);
   }
   else if (cmd == "all_on") {
     controlAllModules(true);
@@ -1319,6 +1334,39 @@ void printModuleList(const int* moduleList) {
   if (i == 0) Serial.print("(ninguno)");
 }
 
+// Función para activar un grupo de módulos
+void activateModuleGroup(const int* moduleList) {
+  Serial.print("Activando módulos: ");
+  printModuleList(moduleList);
+  Serial.println("");
+  
+  bool anySuccess = false;
+  int i = 0;
+  
+  while (moduleList[i] != 0) {
+    int moduleId = moduleList[i];
+    
+    if (modules[moduleId - 1].isOnline) {
+      bool success = controlModule(moduleId, true);
+      if (success) {
+        anySuccess = true;
+        Serial.println("  ✅ Módulo " + String(moduleId) + " encendido");
+      } else {
+        Serial.println("  ❌ Error al encender módulo " + String(moduleId));
+      }
+    } else {
+      Serial.println("  ⚠️ Módulo " + String(moduleId) + " no está online");
+    }
+    
+    i++;
+    delay(50); // Pequeña pausa entre comandos
+  }
+  
+  if (anySuccess) {
+    Serial.println("⏰ Los módulos se apagarán automáticamente en " + String(AUTO_OFF_DELAY/1000.0) + " segundos");
+  }
+}
+
 void printSystemStatus() {
   Serial.println("\n=== ESTADO DEL SISTEMA ===");
   Serial.println("Punto de Acceso: " + String(ssid));
@@ -1417,6 +1465,11 @@ void printCommands() {
   Serial.println("config        - Mostrar configuración actual");
   Serial.println("reset         - Reiniciar sistema");
   Serial.println("help          - Mostrar esta ayuda");
+  Serial.println("");
+  Serial.println("COMANDOS REMOTOS (desde cliente Arduino):");
+  Serial.println("button_group_1 - Activa grupo 1 (mismo que botón 1)");
+  Serial.println("button_group_2 - Activa grupo 2 (mismo que botón 2)");
+  Serial.println("button_group_3 - Activa grupo 3 (mismo que botón 3)");
   Serial.println("");
   Serial.println("BOTONES FÍSICOS:");
   Serial.print("Botón 1 (Pin " + String(BUTTON1_PIN) + ") → Módulos ");
