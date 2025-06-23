@@ -252,7 +252,7 @@ void loop() {
   checkModulesHeartbeat();
   
   // Ejecutar efectos automáticos
-  handleEffects();
+  // handleEffects();
   
   delay(10); // Pequeña pausa para estabilidad
 }
