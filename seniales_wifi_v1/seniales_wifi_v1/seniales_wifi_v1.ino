@@ -42,7 +42,7 @@ const IPAddress subnet(255, 255, 255, 0);
 #define LED_AUTO_OFF 3000
 
 // Configuración de módulos por botón
-const int BUTTON1_MODULES[] = {12, 0};
+const int BUTTON1_MODULES[] = {12};
 const int BUTTON2_MODULES[] = {2, 0};
 const int BUTTON3_MODULES[] = {3, 4, 5, 0};
 
