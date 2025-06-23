@@ -1,17 +1,17 @@
 /*
  * Sistema de Control de 12 Focos - Arduino UNO R4 WiFi (Maestro)
  * Autor: Sistema Control de Iluminación
- * Versión: 4.0 - Con servidor de configuración
+ * Versión: 5.0 - Con UDP para comandos rápidos
  * 
- * Cambios en v4.0:
- * - Agregado endpoint /config para servir configuración a clientes
- * - AUTO_OFF_DELAY configurable desde el maestro
- * - Los clientes leen la configuración al conectarse
- * - Posibilidad de cambiar dinámicamente el tiempo de apagado
+ * Cambios en v5.0:
+ * - Implementación de UDP para comandos de encendido/apagado (más rápido)
+ * - TCP se mantiene para registro, heartbeat y configuración
+ * - Respuesta instantánea sin problemas de conexión
  * 
  * Funcionalidades:
  * - Punto de acceso WiFi autónomo
  * - Control de 12 módulos ESP8266-01S (focos de 10W)
+ * - Comandos UDP para respuesta instantánea
  * - Servidor de configuración centralizada
  * - Sistema de registro automático de módulos
  * - Efectos predefinidos y personalizables
@@ -21,6 +21,7 @@
  */
 
 #include "WiFiS3.h"
+#include <WiFiUdp.h>
 
 // =============================================================================
 // CONFIGURACIÓN DEL SISTEMA
@@ -38,6 +39,10 @@ const IPAddress subnet(255, 255, 255, 0);
 #define HEARTBEAT_INTERVAL 60000  // 60 segundos
 #define MODULE_TIMEOUT 120000     // 2 minutos para considerar módulo offline
 #define EFFECT_DELAY_DEFAULT 500  // Delay por defecto para efectos (ms)
+
+// Puerto UDP para comandos
+#define UDP_PORT 8888
+WiFiUDP udp;
 
 // CONFIGURACIÓN CENTRALIZADA - Cambiar aquí afecta a todos los clientes
 unsigned long AUTO_OFF_DELAY = 3000;  // Tiempo de apagado automático en ms (3 segundos por defecto)
@@ -152,10 +157,11 @@ void setup() {
   Serial.begin(115200);
   delay(1000);
   
-  Serial.println("\n=== SISTEMA DE CONTROL DE FOCOS v4.0 ===");
+  Serial.println("\n=== SISTEMA DE CONTROL DE FOCOS v5.0 ===");
   Serial.println("Inicializando Arduino UNO R4 WiFi como Punto de Acceso...");
-  Serial.println("IMPORTANTE: Configuración centralizada:");
+  Serial.println("IMPORTANTE: Usando UDP para comandos rápidos");
   Serial.println("  - AUTO_OFF_DELAY: " + String(AUTO_OFF_DELAY) + "ms (" + String(AUTO_OFF_DELAY/1000.0) + " segundos)");
+  Serial.println("  - Puerto UDP: " + String(UDP_PORT));
   Serial.println("  - Los clientes leerán esta configuración al conectarse");
   Serial.println("  - Endpoint de configuración: /config (puerto 8080)");
   
@@ -223,6 +229,10 @@ void setup() {
   server.begin();
   apiServer.begin();
   
+  // Iniciar UDP
+  udp.begin(UDP_PORT);
+  Serial.println("Servidor UDP iniciado en puerto " + String(UDP_PORT));
+  
   Serial.println("\n=== SISTEMA LISTO ===");
   printSystemInfo();
   printCommands();
@@ -252,7 +262,7 @@ void loop() {
   checkModulesHeartbeat();
   
   // Ejecutar efectos automáticos
-  // handleEffects();
+  handleEffects();
   
   delay(10); // Pequeña pausa para estabilidad
 }
@@ -558,7 +568,7 @@ void processCommand(String cmd) {
   }
 }
 
-// Función rápida para control de módulos con mejor manejo de errores
+// Función rápida para control de módulos usando UDP
 bool controlModuleFast(int moduleId, bool state) {
   if (moduleId < 1 || moduleId > MAX_MODULES) {
     Serial.println("❌ ID fuera de rango: " + String(moduleId));
@@ -577,37 +587,20 @@ bool controlModuleFast(int moduleId, bool state) {
     return true;
   }
   
-  WiFiClient client;
-  client.setTimeout(500);  // Timeout corto de 500ms
+  // Preparar comando UDP
+  String command = state ? "ON" : "OFF";
   
-  Serial.println("🔌 Conectando con " + modules[index].ip.toString() + ":80");
+  Serial.println("📡 Enviando " + command + " por UDP a " + modules[index].ip.toString() + ":" + String(UDP_PORT));
   
-  if (!client.connect(modules[index].ip, 80)) {
-    Serial.println("❌ No se pudo establecer conexión TCP");
-    Serial.println("   Verificar que el módulo esté encendido");
-    Serial.println("   Verificar conexión de red");
-    return false;
-  }
-  
-  // Conexión exitosa, enviar comando
-  String httpRequest = "GET ";
-  httpRequest += (state ? "/on" : "/off");
-  httpRequest += " HTTP/1.1\r\n";
-  httpRequest += "Host: " + modules[index].ip.toString() + "\r\n";
-  httpRequest += "Connection: close\r\n\r\n";
-  
-  client.print(httpRequest);
-  
-  // Pequeño delay para asegurar envío
-  delay(50);
-  
-  // Cerrar conexión inmediatamente
-  client.stop();
+  // Enviar comando por UDP
+  udp.beginPacket(modules[index].ip, UDP_PORT);
+  udp.print(command);
+  udp.endPacket();
   
   // Actualizar estado local
   modules[index].isOn = state;
   
-  Serial.println("✅ Comando " + String(state ? "ON" : "OFF") + " enviado");
+  Serial.println("✅ Comando " + command + " enviado por UDP a módulo " + String(moduleId));
   return true;
 }
 
@@ -634,52 +627,8 @@ bool controlModule(int moduleId, bool state) {
     return false;
   }
   
-  WiFiClient client;
-  
-  // Configurar timeout más corto para conexión
-  client.setTimeout(HTTP_TIMEOUT);
-  
-  if (client.connect(modules[index].ip, 80)) {
-    String httpRequest = "GET ";
-    httpRequest += (state ? "/on" : "/off");
-    httpRequest += " HTTP/1.1";
-    client.println(httpRequest);
-    client.println("Host: " + modules[index].ip.toString());
-    client.println("Connection: close");
-    client.println();
-    
-    // Timeout más corto para respuesta
-    unsigned long timeout = millis() + HTTP_TIMEOUT;
-    while (client.available() == 0 && millis() < timeout) {
-      delay(10);
-    }
-    
-    bool success = false;
-    if (client.available()) {
-      String response = client.readString();
-      success = response.indexOf("200 OK") != -1;
-    } else {
-      // Si no hay respuesta, asumir éxito para módulos que no responden rápido
-      success = true;
-    }
-    
-    client.stop();
-    
-    if (success) {
-      modules[index].isOn = state;
-      Serial.println("Módulo " + String(moduleId) + " " + (state ? "encendido" : "apagado"));
-      if (state) {
-        Serial.println("⏰ Nota: El módulo se apagará automáticamente en " + String(AUTO_OFF_DELAY/1000.0) + " segundos");
-      }
-      return true;
-    } else {
-      Serial.println("Error al controlar módulo " + String(moduleId));
-      return false;
-    }
-  } else {
-    Serial.println("No se pudo conectar al módulo " + String(moduleId));
-    return false;
-  }
+  // Para comandos individuales, usar UDP también
+  return controlModuleFast(moduleId, state);
 }
 
 void controlAllModules(bool state) {
@@ -688,10 +637,10 @@ void controlAllModules(bool state) {
   int successCount = 0;
   for (int i = 0; i < MAX_MODULES; i++) {
     if (modules[i].isOnline) {
-      if (controlModule(i + 1, state)) {
+      if (controlModuleFast(i + 1, state)) {
         successCount++;
       }
-      delay(100); // Pequeña pausa entre comandos
+      delay(50); // Pequeña pausa entre comandos UDP
     }
   }
   
@@ -754,7 +703,7 @@ void executeWaveEffect() {
   // Apagar todos los módulos
   for (int i = 0; i < MAX_MODULES; i++) {
     if (modules[i].isOnline && modules[i].isOn) {
-      controlModule(i + 1, false);
+      controlModuleFast(i + 1, false);
     }
   }
   
@@ -762,7 +711,7 @@ void executeWaveEffect() {
   
   // Encender módulo actual
   if (effectStep < MAX_MODULES && modules[effectStep].isOnline) {
-    controlModule(effectStep + 1, true);
+    controlModuleFast(effectStep + 1, true);
   }
   
   effectStep++;
@@ -777,7 +726,7 @@ void executeChaseEffect() {
   // Apagar todos
   for (int i = 0; i < MAX_MODULES; i++) {
     if (modules[i].isOnline && modules[i].isOn) {
-      controlModule(i + 1, false);
+      controlModuleFast(i + 1, false);
     }
   }
   
@@ -787,7 +736,7 @@ void executeChaseEffect() {
   for (int i = 0; i < 3; i++) {
     int moduleIndex = (effectStep + i) % MAX_MODULES;
     if (modules[moduleIndex].isOnline) {
-      controlModule(moduleIndex + 1, true);
+      controlModuleFast(moduleIndex + 1, true);
     }
   }
   
@@ -811,7 +760,7 @@ void executeBlinkEffect() {
   
   for (int i = 0; i < MAX_MODULES; i++) {
     if (modules[i].isOnline) {
-      controlModule(i + 1, state);
+      controlModuleFast(i + 1, state);
     }
   }
   
@@ -826,7 +775,7 @@ void executeRandomEffect() {
   for (int i = 0; i < MAX_MODULES; i++) {
     if (modules[i].isOnline) {
       bool state = random(0, 2) == 1;
-      controlModule(i + 1, state);
+      controlModuleFast(i + 1, state);
     }
   }
 }
@@ -925,9 +874,10 @@ void handleApiClients() {
 void handleConfigRequest(WiFiClient& client) {
   String json = "{";
   json += "\"auto_off_delay\":" + String(AUTO_OFF_DELAY) + ",";
-  json += "\"version\":\"4.0\",";
+  json += "\"version\":\"5.0\",";
   json += "\"max_modules\":" + String(MAX_MODULES) + ",";
-  json += "\"effect_delay\":" + String(effectDelay);
+  json += "\"effect_delay\":" + String(effectDelay) + ",";
+  json += "\"udp_port\":" + String(UDP_PORT);
   json += "}";
   
   client.println("HTTP/1.1 200 OK");
@@ -979,7 +929,7 @@ void handleToggleRequest(WiFiClient& client, String request) {
   if (moduleId >= 1 && moduleId <= MAX_MODULES) {
     int index = moduleId - 1;
     bool newState = !modules[index].isOn;
-    bool success = controlModule(moduleId, newState);
+    bool success = controlModuleFast(moduleId, newState);
     
     client.println("HTTP/1.1 200 OK");
     client.println("Content-Type: application/json");
@@ -1179,7 +1129,7 @@ String generateWebInterface() {
   html += "</style></head><body>";
   
   html += "<div class='container'>";
-  html += "<h1>💡 Sistema de Control de Focos</h1>";
+  html += "<h1>💡 Sistema de Control de Focos v5.0</h1>";
   
   // Configuración de tiempo
   html += "<div class='config'>";
@@ -1194,6 +1144,7 @@ String generateWebInterface() {
   html += "<div class='note'>";
   html += "⏰ <strong>Apagado automático:</strong> Los focos se apagan automáticamente después de " + String(AUTO_OFF_DELAY/1000.0) + " segundos<br>";
   html += "💡 <strong>Hardware:</strong> Control de focos de 10W mediante relevadores<br>";
+  html += "🚀 <strong>UDP:</strong> Comandos instantáneos sin latencia<br>";
   html += "🔄 <strong>Configuración:</strong> Los cambios se aplicarán cuando los módulos se reconecten";
   html += "</div>";
   
@@ -1203,6 +1154,7 @@ String generateWebInterface() {
   html += "<p><strong>Módulos Online:</strong> " + String(getOnlineModulesCount()) + "/" + String(MAX_MODULES) + "</p>";
   html += "<p><strong>Efecto Actual:</strong> " + currentEffect + "</p>";
   html += "<p><strong>Modo Automático:</strong> " + String(autoMode ? "Activado" : "Desactivado") + "</p>";
+  html += "<p><strong>Puerto UDP:</strong> " + String(UDP_PORT) + "</p>";
   html += "</div>";
   
   // Módulos individuales
@@ -1269,6 +1221,7 @@ String generateStatusJson() {
   json += "\"onlineModules\":" + String(getOnlineModulesCount()) + ",";
   json += "\"totalModules\":" + String(MAX_MODULES) + ",";
   json += "\"autoOffDelay\":" + String(AUTO_OFF_DELAY) + ",";
+  json += "\"udpPort\":" + String(UDP_PORT) + ",";
   json += "\"uptime\":" + String(millis()) + "";
   json += "}";
   return json;
@@ -1347,7 +1300,7 @@ void activateModuleGroup(const int* moduleList) {
     int moduleId = moduleList[i];
     
     if (modules[moduleId - 1].isOnline) {
-      bool success = controlModuleFast(moduleId, true);  // <-- USAR controlModuleFast
+      bool success = controlModuleFast(moduleId, true);
       if (success) {
         anySuccess = true;
         Serial.println("  ✅ Módulo " + String(moduleId) + " encendido");
@@ -1375,6 +1328,7 @@ void printSystemStatus() {
   Serial.println("Efecto actual: " + currentEffect);
   Serial.println("Modo automático: " + String(autoMode ? "ON" : "OFF"));
   Serial.println("AUTO_OFF_DELAY: " + String(AUTO_OFF_DELAY) + "ms (" + String(AUTO_OFF_DELAY/1000.0) + " segundos)");
+  Serial.println("Puerto UDP: " + String(UDP_PORT));
   Serial.println("Uptime: " + String(millis()/1000) + " segundos");
   Serial.println("=========================\n");
 }
@@ -1413,6 +1367,7 @@ void printConfiguration() {
   Serial.println("HEARTBEAT_INTERVAL: " + String(HEARTBEAT_INTERVAL/1000) + " segundos");
   Serial.println("MODULE_TIMEOUT: " + String(MODULE_TIMEOUT/1000) + " segundos");
   Serial.println("MIN_ACTIVATION_INTERVAL: " + String(getMinActivationInterval()) + "ms");
+  Serial.println("UDP_PORT: " + String(UDP_PORT));
   Serial.println("===========================\n");
 }
 
@@ -1423,6 +1378,7 @@ void printSystemInfo() {
   Serial.println("IP Gateway: " + WiFi.localIP().toString());
   Serial.println("Puerto Web: 80");
   Serial.println("Puerto API: 8080");
+  Serial.println("Puerto UDP: " + String(UDP_PORT));
   Serial.println("Máximo módulos: " + String(MAX_MODULES));
   Serial.println("\nBotones físicos:");
   Serial.print("  Botón 1: Pin " + String(BUTTON1_PIN) + " → Módulos ");
@@ -1441,6 +1397,7 @@ void printSystemInfo() {
   Serial.println("  Pin de relay: GPIO0 (con resistencia pull-up 10K)");
   Serial.println("  Control de focos: 10W por módulo");
   Serial.println("  Apagado automático: " + String(AUTO_OFF_DELAY/1000.0) + " segundos (configurable)");
+  Serial.println("  Comunicación: UDP puerto " + String(UDP_PORT) + " (comandos)");
   Serial.println("  Endpoint de configuración: http://" + WiFi.localIP().toString() + ":8080/config");
   Serial.println("==============================\n");
 }
@@ -1485,6 +1442,7 @@ void printCommands() {
   Serial.println("CONFIGURACIÓN:");
   Serial.println("Los módulos se apagarán automáticamente después de " + String(AUTO_OFF_DELAY/1000.0) + " segundos");
   Serial.println("Los LEDs indicadores se apagan automáticamente después de 3 segundos");
+  Serial.println("Comunicación UDP en puerto " + String(UDP_PORT) + " para comandos instantáneos");
   Serial.println("============================\n");
 }
 
