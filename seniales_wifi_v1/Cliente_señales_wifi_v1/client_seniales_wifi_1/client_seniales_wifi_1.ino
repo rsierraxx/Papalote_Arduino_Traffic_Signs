@@ -36,7 +36,7 @@
 // CONFIGURACIÓN DEL MÓDULO - ¡CAMBIAR PARA CADA MÓDULO!
 // =============================================================================
 
-#define MODULE_ID 1  // ¡¡¡ CAMBIAR ESTE NÚMERO PARA CADA MÓDULO (1-12) !!!
+#define MODULE_ID 12  // ¡¡¡ CAMBIAR ESTE NÚMERO PARA CADA MÓDULO (1-12) !!!
 
 // =============================================================================
 // CONFIGURACIÓN DE RED
