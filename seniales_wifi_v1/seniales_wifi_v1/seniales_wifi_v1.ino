@@ -41,10 +41,13 @@ const IPAddress subnet(255, 255, 255, 0);
 #define BUTTON_DEBOUNCE 50
 #define LED_AUTO_OFF 3000
 
-// Configuración de módulos por botón
-const int BUTTON1_MODULES[] = {12};
-const int BUTTON2_MODULES[] = {2, 0};
-const int BUTTON3_MODULES[] = {3, 4, 5, 0};
+// Configuración de módulos por botón (6 grupos)
+const int BUTTON1_MODULES[] = {1,2,3};      // Boton Grandes 1
+const int BUTTON2_MODULES[] = {4,5};       // Boton Grandes 2  
+const int BUTTON3_MODULES[] = {6,7}; // Boton Grandes 3
+const int BUTTON4_MODULES[] = {1};      // Boton peques 1
+const int BUTTON5_MODULES[] = {2,3};    // Boton peques 2
+const int BUTTON6_MODULES[] = {4,5}; // Boton peques 3
 
 // =============================================================================
 // VARIABLES GLOBALES
@@ -225,6 +228,15 @@ void handleUDP() {
   }
   else if (cmd == "button_group_3") {
     activateGroup(BUTTON3_MODULES);
+  }
+  else if (cmd == "button_group_4") {
+    activateGroup(BUTTON4_MODULES);
+  }
+  else if (cmd == "button_group_5") {
+    activateGroup(BUTTON5_MODULES);
+  }
+  else if (cmd == "button_group_6") {
+    activateGroup(BUTTON6_MODULES);
   }
   else if (cmd == "all_on") {
     allModules(true);
@@ -503,6 +515,10 @@ void handleAPI() {
   
   String request = client.readStringUntil('\r');
   client.flush();
+  int tempID = request.indexOf("/register?id=");
+
+  Serial.println("tempID: ");
+  Serial.println(tempID);
   
   // Registro de módulo
   if (request.indexOf("/register?id=") != -1) {

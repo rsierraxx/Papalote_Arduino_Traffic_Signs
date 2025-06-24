@@ -25,9 +25,16 @@ const int udpPort = 8888;
 #define BUTTON1_PIN 2
 #define BUTTON2_PIN 3
 #define BUTTON3_PIN 4
+#define BUTTON4_PIN 8    // Nuevo botón 4 Leds: {1};
+#define BUTTON5_PIN 9    // Nuevo botón 5 Leds: {2,3};
+#define BUTTON6_PIN 10   // Nuevo botón 6 Leds: {4,5};
+
 #define LED1_PIN 5
 #define LED2_PIN 6
 #define LED3_PIN 7
+#define LED4_PIN 11      // Nuevo LED 4
+#define LED5_PIN 12      // Nuevo LED 5
+#define LED6_PIN 13      // Nuevo LED 6
 
 // Tiempos
 #define DEBOUNCE_TIME 50
@@ -38,6 +45,9 @@ const int udpPort = 8888;
 const char* CMD_GROUP_1 = "button_group_1";
 const char* CMD_GROUP_2 = "button_group_2";
 const char* CMD_GROUP_3 = "button_group_3";
+const char* CMD_GROUP_4 = "button_group_4";
+const char* CMD_GROUP_5 = "button_group_5";
+const char* CMD_GROUP_6 = "button_group_6";
 
 // =============================================================================
 // VARIABLES
@@ -53,8 +63,8 @@ struct Button {
   unsigned long lastPress = 0;
 };
 
-Button buttons[3];
-unsigned long ledOffTime[3] = {0, 0, 0};
+Button buttons[6];
+unsigned long ledOffTime[6] = {0, 0, 0, 0, 0, 0};
 
 // =============================================================================
 // SETUP
@@ -71,15 +81,24 @@ void setup() {
   pinMode(BUTTON1_PIN, INPUT_PULLUP);
   pinMode(BUTTON2_PIN, INPUT_PULLUP);
   pinMode(BUTTON3_PIN, INPUT_PULLUP);
+  pinMode(BUTTON4_PIN, INPUT_PULLUP);
+  pinMode(BUTTON5_PIN, INPUT_PULLUP);
+  pinMode(BUTTON6_PIN, INPUT_PULLUP);
   
   pinMode(LED1_PIN, OUTPUT);
   pinMode(LED2_PIN, OUTPUT);
   pinMode(LED3_PIN, OUTPUT);
+  pinMode(LED4_PIN, OUTPUT);
+  pinMode(LED5_PIN, OUTPUT);
+  pinMode(LED6_PIN, OUTPUT);
   
   // LEDs apagados
   digitalWrite(LED1_PIN, LOW);
   digitalWrite(LED2_PIN, LOW);
   digitalWrite(LED3_PIN, LOW);
+  digitalWrite(LED4_PIN, LOW);
+  digitalWrite(LED5_PIN, LOW);
+  digitalWrite(LED6_PIN, LOW);
   
   // Conectar WiFi
   connectWiFi();
@@ -105,14 +124,17 @@ void loop() {
   }
   
   // Leer botones
-  bool states[3] = {
+  bool states[6] = {
     digitalRead(BUTTON1_PIN),
     digitalRead(BUTTON2_PIN),
-    digitalRead(BUTTON3_PIN)
+    digitalRead(BUTTON3_PIN),
+    digitalRead(BUTTON4_PIN),
+    digitalRead(BUTTON5_PIN),
+    digitalRead(BUTTON6_PIN)
   };
   
   // Procesar cada botón
-  for (int i = 0; i < 3; i++) {
+  for (int i = 0; i < 6; i++) {
     // Debounce
     if (states[i] != buttons[i].lastState) {
       buttons[i].lastDebounce = millis();
@@ -131,9 +153,10 @@ void loop() {
           } else {
             // Parpadeo rápido = esperar
             for (int j = 0; j < 3; j++) {
-              digitalWrite(LED1_PIN + i, HIGH);
+              int ledPin = (i < 3) ? (LED1_PIN + i) : (LED4_PIN + (i - 3));
+              digitalWrite(ledPin, HIGH);
               delay(50);
-              digitalWrite(LED1_PIN + i, LOW);
+              digitalWrite(ledPin, LOW);
               delay(50);
             }
           }
@@ -146,9 +169,10 @@ void loop() {
   
   // Apagar LEDs automáticamente
   unsigned long now = millis();
-  for (int i = 0; i < 3; i++) {
+  for (int i = 0; i < 6; i++) {
     if (ledOffTime[i] > 0 && now >= ledOffTime[i]) {
-      digitalWrite(LED1_PIN + i, LOW);
+      int ledPin = (i < 3) ? (LED1_PIN + i) : (LED4_PIN + (i - 3));
+      digitalWrite(ledPin, LOW);
       ledOffTime[i] = 0;
     }
   }
@@ -184,10 +208,16 @@ void connectWiFi() {
       digitalWrite(LED1_PIN, HIGH);
       digitalWrite(LED2_PIN, HIGH);
       digitalWrite(LED3_PIN, HIGH);
+      digitalWrite(LED4_PIN, HIGH);
+      digitalWrite(LED5_PIN, HIGH);
+      digitalWrite(LED6_PIN, HIGH);
       delay(100);
       digitalWrite(LED1_PIN, LOW);
       digitalWrite(LED2_PIN, LOW);
       digitalWrite(LED3_PIN, LOW);
+      digitalWrite(LED4_PIN, LOW);
+      digitalWrite(LED5_PIN, LOW);
+      digitalWrite(LED6_PIN, LOW);
       delay(100);
     }
   } else {
@@ -202,14 +232,16 @@ void processButton(int button) {
   if (!wifiConnected) {
     Serial.println("Sin WiFi!");
     // LED rojo rápido
-    digitalWrite(LED1_PIN + button, HIGH);
+    int ledPin = (button < 3) ? (LED1_PIN + button) : (LED4_PIN + (button - 3));
+    digitalWrite(ledPin, HIGH);
     delay(50);
-    digitalWrite(LED1_PIN + button, LOW);
+    digitalWrite(ledPin, LOW);
     return;
   }
   
   // Encender LED
-  digitalWrite(LED1_PIN + button, HIGH);
+  int ledPin = (button < 3) ? (LED1_PIN + button) : (LED4_PIN + (button - 3));
+  digitalWrite(ledPin, HIGH);
   ledOffTime[button] = millis() + LED_ON_TIME;
   
   // Enviar comando
@@ -218,6 +250,9 @@ void processButton(int button) {
     case 0: command = CMD_GROUP_1; break;
     case 1: command = CMD_GROUP_2; break;
     case 2: command = CMD_GROUP_3; break;
+    case 3: command = CMD_GROUP_4; break;
+    case 4: command = CMD_GROUP_5; break;
+    case 5: command = CMD_GROUP_6; break;
   }
   
   udp.beginPacket(masterIP, udpPort);
