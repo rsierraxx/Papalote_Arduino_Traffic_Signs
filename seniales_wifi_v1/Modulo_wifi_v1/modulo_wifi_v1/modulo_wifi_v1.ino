@@ -1,1127 +1,275 @@
 /*
- * Sistema de Control de Focos - ESP8266-01S (Módulo Cliente)
- * Autor: Sistema Control de Iluminación
- * Versión: 5.0 - Con UDP para comandos rápidos
+ * Cliente ESP8266 v2.1 - Versión Simple con IP del Maestro
  * 
- * IMPORTANTE: Cambiar MODULE_ID para cada módulo (1-12)
+ * Esta versión no usa auto-discovery, debes configurar la IP del maestro
  * 
- * Cambios en v5.0:
- * - Recepción de comandos por UDP (puerto 8888) para respuesta instantánea
- * - Mantiene servidor HTTP para compatibilidad y respaldo
- * - TCP para registro, heartbeat y configuración
- * - Sin problemas de conexión TCP al recibir comandos rápidamente
- * 
- * Funcionalidades:
- * - Conexión automática al Arduino UNO R4 WiFi
- * - Auto-registro con ID único
- * - Recepción de comandos UDP (más rápido)
- * - Configuración dinámica desde maestro
- * - Control de relevador para foco de 10W
- * - Apagado automático configurable
- * - Servidor HTTP integrado
- * - Sistema de heartbeat automático
- * - Reconexión automática
- * - Interfaz web individual
- * 
- * Conexiones:
- * GPIO0 → Control relevador (con resistencia pull-up 10K a 3.3V)
- * GPIO2 → LED indicador estado
- * VCC → 3.3V | GND → Tierra
+ * CONFIGURAR:
+ * 1. MODULE_ID único para cada ESP (1-12)
+ * 2. ROUTER_SSID y ROUTER_PASS
+ * 3. MASTER_IP con la IP real del maestro
  */
 
 #include <ESP8266WiFi.h>
-#include <ESP8266WebServer.h>
 #include <ESP8266HTTPClient.h>
 #include <WiFiUdp.h>
 
 // =============================================================================
-// CONFIGURACIÓN DEL MÓDULO - ¡CAMBIAR PARA CADA MÓDULO!
+// CONFIGURACIÓN - CAMBIAR ESTOS VALORES
 // =============================================================================
 
-#define MODULE_ID 1  // ¡¡¡ CAMBIAR ESTE NÚMERO PARA CADA MÓDULO (1-12) !!!
+const int MODULE_ID = 1;                        // CAMBIAR! (1-12) ID único
+
+const char* ROUTER_SSID = "sobredosis";     // CAMBIAR!
+const char* ROUTER_PASS = "2WC456403581";   // CAMBIAR!
+
+const char* MASTER_IP = "192.168.4.1";        // CAMBIAR! IP del maestro Arduino
 
 // =============================================================================
-// CONFIGURACIÓN DE RED
+// CONFIGURACIÓN DEL SISTEMA (no cambiar)
 // =============================================================================
 
-const char* ssid = "LED_CONTROL_SYSTEM";
-const char* password = "12345678";
-const char* masterIP = "192.168.4.1";
-const int masterPort = 8080;
-
-// Puerto UDP
+#define RELAY_PIN 0
+#define LED_PIN 2
 #define UDP_PORT 8888
-WiFiUDP udp;
-char udpBuffer[255];
+#define API_PORT 8080
+#define AUTO_OFF_DELAY 3000
+#define HEARTBEAT_INTERVAL 30000
+#define REGISTER_RETRY 5000
 
-// =============================================================================
-// CONFIGURACIÓN DE HARDWARE
-// =============================================================================
-
-// Regresando a GPIO0 - IMPORTANTE: Agregar resistencia pull-up 10K a 3.3V
-#define RELAY_PIN 0      // GPIO0 - Control del relevador
-#define STATUS_LED_PIN 2 // GPIO2 - LED indicador
-
-// Configuración de lógica del relay
-// La mayoría de módulos relay funcionan con lógica invertida
-#define RELAY_INVERTED true   // true = LOW enciende, HIGH apaga
-
-// Estados del relay según la lógica
-#define RELAY_ON  (RELAY_INVERTED ? LOW : HIGH)
-#define RELAY_OFF (RELAY_INVERTED ? HIGH : LOW)
-
-// =============================================================================
-// CONFIGURACIÓN DE TIEMPOS
-// =============================================================================
-
-// AUTO_OFF_DELAY ahora es variable y se lee del maestro
-unsigned long AUTO_OFF_DELAY = 3000;      // Valor por defecto 3 segundos
-#define HEARTBEAT_INTERVAL 45000          // 45 segundos
-#define RECONNECT_DELAY 5000              // 5 segundos
-#define REGISTRATION_RETRY 10000          // 10 segundos
-#define HTTP_TIMEOUT 5000                 // 5 segundos
-#define CONFIG_RETRY_INTERVAL 30000       // 30 segundos para reintentar config
-
-// =============================================================================
-// VARIABLES GLOBALES
-// =============================================================================
-
-ESP8266WebServer server(80);
-WiFiClient wifiClient;
-HTTPClient httpClient;
-
-// Estado del sistema
-bool relayState = false;
-bool isRegistered = false;
-bool wifiConnected = false;
-bool configReceived = false;
+bool registered = false;
+bool relayOn = false;
+unsigned long relayOnTime = 0;
 unsigned long lastHeartbeat = 0;
-unsigned long lastReconnect = 0;
-unsigned long lastRegistration = 0;
-unsigned long lastConfigRequest = 0;
-unsigned long bootTime = 0;
+unsigned long lastRegister = 0;
 
-// Variables para apagado automático
-bool autoOffActive = false;
-unsigned long turnOnTime = 0;
-
-// Estadísticas
-int totalCommands = 0;
-int udpCommands = 0;
-int httpCommands = 0;
-int failedCommands = 0;
-int heartbeatCount = 0;
-int reconnectCount = 0;
-int autoOffCount = 0;
-int configRequestCount = 0;
+WiFiUDP udp;
 
 // =============================================================================
-// SETUP - CONFIGURACIÓN INICIAL
+// SETUP
 // =============================================================================
 
 void setup() {
   Serial.begin(115200);
-  delay(1000);
-  
-  bootTime = millis();
-  
-  Serial.println();
+  Serial.println("\n\n========================================");
+  Serial.println("ESP8266 v2.1 - Módulo #" + String(MODULE_ID));
+  Serial.println("Maestro en: " + String(MASTER_IP));
   Serial.println("========================================");
-  Serial.println("    MODULO CONTROL FOCO ESP8266-01S v5.0");
-  Serial.println("========================================");
-  Serial.println("ID: " + String(MODULE_ID));
-  Serial.println("Version: 5.0 - Con UDP para comandos rápidos");
-  Serial.println("Foco: 10W");
-  Serial.println("Inicializando...");
   
-  // Configurar pines ANTES de cualquier otra cosa
-  initializePins();
+  // Pines
+  pinMode(RELAY_PIN, OUTPUT);
+  pinMode(LED_PIN, OUTPUT);
+  digitalWrite(RELAY_PIN, LOW);
+  digitalWrite(LED_PIN, HIGH);
   
-  // Parpadeo inicial para indicar que el módulo está vivo
-  Serial.println("🔵 LED de estado: Indicando inicio...");
-  for (int i = 0; i < 5; i++) {
-    digitalWrite(STATUS_LED_PIN, HIGH);
-    delay(100);
-    digitalWrite(STATUS_LED_PIN, LOW);
-    delay(100);
-  }
-  
-  // Mostrar información del chip
-  printChipInfo();
+  // Pull-up para el relay
+  pinMode(RELAY_PIN, INPUT_PULLUP);
+  digitalWrite(RELAY_PIN, LOW);
+  pinMode(RELAY_PIN, OUTPUT);
   
   // Conectar WiFi
   connectWiFi();
   
-  // Configurar servidor web
-  setupWebServer();
-  
-  // Iniciar UDP
+  // UDP
   udp.begin(UDP_PORT);
-  Serial.println("Servidor UDP iniciado en puerto " + String(UDP_PORT));
-  Serial.println("ℹ️ El módulo ahora puede recibir comandos por UDP (más rápido)");
+  Serial.println("UDP puerto: " + String(UDP_PORT));
   
-  // Intentar obtener configuración del maestro
-  if (wifiConnected) {
-    requestConfiguration();
-  }
-  
-  // Primer intento de registro
-  registerWithMaster();
-  
-  Serial.println("========================================");
-  Serial.println("MODULO LISTO - ID: " + String(MODULE_ID));
-  Serial.println("IP: " + WiFi.localIP().toString());
-  Serial.println("Estado: " + String(isRegistered ? "Registrado" : "Pendiente"));
-  Serial.println("Auto-off: " + String(AUTO_OFF_DELAY/1000.0) + " segundos" + String(configReceived ? " (del maestro)" : " (por defecto)"));
-  Serial.println("UDP: Puerto " + String(UDP_PORT) + " activo");
-  Serial.println("========================================");
-  Serial.println("");
-  Serial.println("🔵 Indicadores LED:");
-  Serial.println("  - Parpadeo rápido: Buscando WiFi");
-  Serial.println("  - 3 parpadeos rápidos: Conexión exitosa");
-  Serial.println("  - 5 parpadeos lentos: Error de conexión");
-  Serial.println("  - LED breve: Heartbeat/Comando UDP");
-  Serial.println("  - LED fijo: Foco encendido");
-  Serial.println("");
+  // Registrar inmediatamente
+  delay(1000);
+  registerModule();
 }
 
 // =============================================================================
-// LOOP PRINCIPAL
+// LOOP
 // =============================================================================
 
 void loop() {
-  // Yield adicional para mejorar respuesta
-  yield();
-  
-  // Manejar servidor web
-  server.handleClient();
-  
-  // Verificar comandos UDP
-  int packetSize = udp.parsePacket();
-  if (packetSize) {
-    int len = udp.read(udpBuffer, 255);
-    if (len > 0) {
-      udpBuffer[len] = 0;
-      String command = String(udpBuffer);
-      
-      Serial.println("📥 Comando UDP recibido: " + command + " desde " + udp.remoteIP().toString());
-      
-      // Breve parpadeo del LED para indicar comando recibido
-      digitalWrite(STATUS_LED_PIN, HIGH);
-      delay(20);
-      if (!relayState) digitalWrite(STATUS_LED_PIN, LOW);
-      
-      if (command == "ON") {
-        setRelayState(true, true);  // Activar con timer
-        udpCommands++;
-      } else if (command == "OFF") {
-        setRelayState(false, false); // Desactivar sin timer
-        // Cancelar temporizador si estaba activo
-        if (autoOffActive) {
-          autoOffActive = false;
-          Serial.println("⏹️ Timer de apagado cancelado");
-        }
-        udpCommands++;
-      } else {
-        Serial.println("⚠️ Comando UDP desconocido: " + command);
-      }
-    }
-  }
-  
-  // Verificar apagado automático
-  handleAutoOff();
-  
-  // Verificar estado WiFi
+  // Verificar WiFi
   if (WiFi.status() != WL_CONNECTED) {
-    handleWiFiReconnection();
-  } else {
-    wifiConnected = true;
-    
-    // Si no tenemos configuración, intentar obtenerla
-    if (!configReceived) {
-      handleConfigurationRequest();
-    }
-    
-    // Manejar registro con maestro
-    if (!isRegistered) {
-      handleRegistration();
-    }
-    
-    // Enviar heartbeat periódico
-    if (isRegistered) {
-      handleHeartbeat();
-    }
-  }
-  
-  // Pausa mínima
-  delay(1);
-  
-  // Yield para mantener watchdog activo
-  yield();
-}
-
-// =============================================================================
-// OBTENCIÓN DE CONFIGURACIÓN DESDE MAESTRO
-// =============================================================================
-
-void handleConfigurationRequest() {
-  if (millis() - lastConfigRequest < CONFIG_RETRY_INTERVAL) return;
-  
-  lastConfigRequest = millis();
-  requestConfiguration();
-}
-
-void requestConfiguration() {
-  configRequestCount++;
-  Serial.println("📋 Solicitando configuración al maestro (intento #" + String(configRequestCount) + ")...");
-  
-  // Parpadeo mientras solicita configuración
-  digitalWrite(STATUS_LED_PIN, HIGH);
-  
-  String url = "http://" + String(masterIP) + ":" + String(masterPort) + "/config";
-  
-  httpClient.begin(wifiClient, url);
-  httpClient.setTimeout(HTTP_TIMEOUT);
-  
-  int httpCode = httpClient.GET();
-  
-  digitalWrite(STATUS_LED_PIN, LOW);
-  
-  if (httpCode == HTTP_CODE_OK) {
-    String payload = httpClient.getString();
-    
-    // Parsear JSON simple manualmente
-    int delayStart = payload.indexOf("\"auto_off_delay\":") + 17;
-    if (delayStart > 17) {
-      int delayEnd = payload.indexOf(",", delayStart);
-      if (delayEnd == -1) delayEnd = payload.indexOf("}", delayStart);
-      
-      String delayStr = payload.substring(delayStart, delayEnd);
-      unsigned long newDelay = delayStr.toInt();
-      
-      if (newDelay >= 1000 && newDelay <= 60000) {
-        AUTO_OFF_DELAY = newDelay;
-        configReceived = true;
-        Serial.println("✅ Configuración recibida:");
-        Serial.println("   AUTO_OFF_DELAY: " + String(AUTO_OFF_DELAY) + "ms (" + String(AUTO_OFF_DELAY/1000.0) + " segundos)");
-        
-        // Verificar si hay puerto UDP en la configuración
-        int udpStart = payload.indexOf("\"udp_port\":") + 11;
-        if (udpStart > 11) {
-          int udpEnd = payload.indexOf(",", udpStart);
-          if (udpEnd == -1) udpEnd = payload.indexOf("}", udpStart);
-          String udpStr = payload.substring(udpStart, udpEnd);
-          Serial.println("   UDP_PORT confirmado: " + udpStr);
-        }
-        
-        // Parpadeo doble rápido para confirmar configuración recibida
-        for (int i = 0; i < 2; i++) {
-          digitalWrite(STATUS_LED_PIN, HIGH);
-          delay(50);
-          digitalWrite(STATUS_LED_PIN, LOW);
-          delay(50);
-        }
-      } else {
-        Serial.println("⚠️ Valor de delay inválido recibido: " + String(newDelay));
-      }
-    }
-  } else if (httpCode > 0) {
-    Serial.println("⚠️ Error obteniendo configuración - HTTP " + String(httpCode));
-  } else {
-    Serial.println("⚠️ Error conectando para configuración: " + httpClient.errorToString(httpCode));
-  }
-  
-  httpClient.end();
-}
-
-// =============================================================================
-// CONTROL DE APAGADO AUTOMÁTICO
-// =============================================================================
-
-void handleAutoOff() {
-  // Si el apagado automático está activo y el relay está encendido
-  if (autoOffActive && relayState) {
-    unsigned long currentTime = millis();
-    unsigned long elapsedTime = currentTime - turnOnTime;
-    
-    // Verificar si ha pasado el tiempo configurado
-    if (elapsedTime >= AUTO_OFF_DELAY) {
-      // Apagar el relevador
-      setRelayState(false, false);  // false = no activar timer
-      
-      // Desactivar el temporizador
-      autoOffActive = false;
-      autoOffCount++;
-      
-      Serial.println("⏰ APAGADO AUTOMÁTICO ejecutado (" + String(AUTO_OFF_DELAY/1000.0) + " segundos cumplidos)");
-      Serial.println("   Total apagados automáticos: " + String(autoOffCount));
-    }
-  }
-}
-
-// =============================================================================
-// CONFIGURACIÓN DE HARDWARE
-// =============================================================================
-
-void initializePins() {
-  Serial.println("--- CONFIGURANDO PINES ---");
-  Serial.println("⚠️  ADVERTENCIA: Usando GPIO0 para relay de foco 10W");
-  Serial.println("   IMPORTANTE: Agregar resistencia pull-up 10K entre GPIO0 y 3.3V");
-  Serial.println("   Esto evita problemas de arranque en modo programación");
-  Serial.println("   Carga máxima: Foco de 10W");
-  
-  // CRÍTICO: Establecer GPIO0 en HIGH antes de configurar como OUTPUT
-  digitalWrite(RELAY_PIN, RELAY_OFF);  // Asegurar estado OFF
-  pinMode(RELAY_PIN, OUTPUT);
-  digitalWrite(RELAY_PIN, RELAY_OFF);  // Confirmar estado OFF
-  
-  // LED de estado
-  pinMode(STATUS_LED_PIN, OUTPUT);
-  digitalWrite(STATUS_LED_PIN, LOW);
-  
-  relayState = false;
-  
-  Serial.println("✓ Pines configurados");
-  Serial.println("  GPIO0 (Relevador): OUTPUT");
-  Serial.println("  GPIO2 (LED Estado): OUTPUT");
-  Serial.println("  Lógica relay: " + String(RELAY_INVERTED ? "INVERTIDA" : "NORMAL"));
-  Serial.println("  Estado OFF = " + String(RELAY_OFF == HIGH ? "HIGH" : "LOW"));
-  Serial.println("  Estado ON = " + String(RELAY_ON == HIGH ? "HIGH" : "LOW"));
-  
-  // Sin prueba de relay - módulo listo inmediatamente
-  Serial.println("✓ Configuración completada - Relay en estado OFF");
-  Serial.println("ℹ️ Prueba de relay omitida para inicio más rápido\n");
-}
-
-void printChipInfo() {
-  Serial.println("--- INFORMACIÓN DEL CHIP ---");
-  Serial.println("Chip ID: " + String(ESP.getChipId(), HEX));
-  Serial.println("Flash Size: " + String(ESP.getFlashChipSize()) + " bytes");
-  Serial.println("Free Heap: " + String(ESP.getFreeHeap()) + " bytes");
-  Serial.println("CPU Freq: " + String(ESP.getCpuFreqMHz()) + " MHz");
-  Serial.println("MAC: " + WiFi.macAddress());
-  
-  // Detectar causa del reinicio
-  rst_info *resetInfo = ESP.getResetInfoPtr();
-  Serial.print("Reset reason: ");
-  Serial.println(resetInfo->reason);
-}
-
-// =============================================================================
-// GESTIÓN WiFi
-// =============================================================================
-
-void connectWiFi() {
-  Serial.println("--- CONECTANDO WiFi ---");
-  Serial.println("SSID: " + String(ssid));
-  Serial.println("🔵 LED parpadeando durante conexión...");
-  
-  WiFi.mode(WIFI_STA);
-  WiFi.setAutoReconnect(true);
-  WiFi.persistent(true);
-  WiFi.begin(ssid, password);
-  
-  int attempts = 0;
-  bool ledState = false;
-  
-  while (WiFi.status() != WL_CONNECTED && attempts < 30) {
-    // Parpadear LED durante la conexión
-    ledState = !ledState;
-    digitalWrite(STATUS_LED_PIN, ledState ? HIGH : LOW);
-    
-    delay(250);  // Parpadeo rápido cada 250ms
-    Serial.print(".");
-    
-    // Segundo parpadeo en el mismo ciclo
-    ledState = !ledState;
-    digitalWrite(STATUS_LED_PIN, ledState ? HIGH : LOW);
-    delay(250);
-    
-    attempts++;
-  }
-  
-  // Apagar LED al finalizar el intento
-  digitalWrite(STATUS_LED_PIN, LOW);
-  
-  if (WiFi.status() == WL_CONNECTED) {
-    wifiConnected = true;
-    Serial.println();
-    Serial.println("✓ WiFi Conectado!");
-    Serial.println("  IP: " + WiFi.localIP().toString());
-    Serial.println("  RSSI: " + String(WiFi.RSSI()) + " dBm");
-    Serial.println("  Gateway: " + WiFi.gatewayIP().toString());
-    
-    // Parpadeo rápido 3 veces para indicar conexión exitosa
-    for (int i = 0; i < 3; i++) {
-      digitalWrite(STATUS_LED_PIN, HIGH);
-      delay(100);
-      digitalWrite(STATUS_LED_PIN, LOW);
-      delay(100);
-    }
-  } else {
-    wifiConnected = false;
-    Serial.println();
-    Serial.println("✗ Error conectando WiFi");
-    
-    // Parpadeo lento 5 veces para indicar error
-    for (int i = 0; i < 5; i++) {
-      digitalWrite(STATUS_LED_PIN, HIGH);
-      delay(500);
-      digitalWrite(STATUS_LED_PIN, LOW);
-      delay(500);
-    }
-  }
-}
-
-void handleWiFiReconnection() {
-  if (millis() - lastReconnect < RECONNECT_DELAY) return;
-  
-  lastReconnect = millis();
-  reconnectCount++;
-  wifiConnected = false;
-  isRegistered = false;
-  configReceived = false;  // Necesitamos obtener config de nuevo
-  
-  Serial.println("⚠ WiFi desconectado. Reintento #" + String(reconnectCount));
-  
-  // Parpadeo de advertencia - 2 parpadeos largos
-  for (int i = 0; i < 2; i++) {
-    digitalWrite(STATUS_LED_PIN, HIGH);
-    delay(300);
-    digitalWrite(STATUS_LED_PIN, LOW);
-    delay(300);
-  }
-  
-  // Reiniciar si hay demasiados fallos
-  if (reconnectCount > 10) {
-    Serial.println("🔄 Reiniciando módulo por exceso de fallos...");
-    
-    // Parpadeo rápido antes de reiniciar
-    for (int i = 0; i < 10; i++) {
-      digitalWrite(STATUS_LED_PIN, HIGH);
-      delay(50);
-      digitalWrite(STATUS_LED_PIN, LOW);
-      delay(50);
-    }
-    
-    delay(1000);
+    Serial.println("WiFi perdido!");
+    delay(5000);
     ESP.restart();
   }
   
-  // Intentar reconexión
-  WiFi.disconnect();
-  delay(1000);
-  connectWiFi();
-  
-  // Si reconectamos, obtener configuración
-  if (wifiConnected) {
-    requestConfiguration();
+  // Registrar si no está registrado
+  if (!registered && millis() - lastRegister > REGISTER_RETRY) {
+    registerModule();
+    lastRegister = millis();
   }
+  
+  // Heartbeat
+  if (registered && millis() - lastHeartbeat > HEARTBEAT_INTERVAL) {
+    sendHeartbeat();
+    lastHeartbeat = millis();
+  }
+  
+  // Auto-apagado
+  if (relayOn && millis() - relayOnTime >= AUTO_OFF_DELAY) {
+    digitalWrite(RELAY_PIN, LOW);
+    digitalWrite(LED_PIN, LOW);
+    relayOn = false;
+    Serial.println("💡 Auto-OFF");
+  }
+  
+  // UDP
+  handleUDP();
+  
+  // Estado
+  static unsigned long lastStatus = 0;
+  if (millis() - lastStatus > 30000) {
+    printStatus();
+    lastStatus = millis();
+  }
+  
+  delay(10);
 }
 
 // =============================================================================
-// SERVIDOR WEB
+// CONEXIÓN WIFI
 // =============================================================================
 
-void setupWebServer() {
-  Serial.println("--- CONFIGURANDO SERVIDOR WEB ---");
+void connectWiFi() {
+  Serial.print("\nConectando a " + String(ROUTER_SSID));
   
-  // Página principal
-  server.on("/", HTTP_GET, handleRoot);
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(ROUTER_SSID, ROUTER_PASS);
   
-  // Controles básicos
-  server.on("/on", HTTP_GET, handleOn);
-  server.on("/off", HTTP_GET, handleOff);
-  server.on("/toggle", HTTP_GET, handleToggle);
+  // Opcional: IP fija
+  /*
+  IPAddress ip(192, 168, 1, 100 + MODULE_ID);
+  IPAddress gateway(192, 168, 1, 1);
+  IPAddress subnet(255, 255, 255, 0);
+  WiFi.config(ip, gateway, subnet);
+  */
   
-  // Efectos especiales
-  server.on("/blink_fast", HTTP_GET, handleBlinkFast);
-  server.on("/blink_slow", HTTP_GET, handleBlinkSlow);
-  
-  // Información y estado
-  server.on("/status", HTTP_GET, handleStatus);
-  server.on("/info", HTTP_GET, handleInfo);
-  
-  // Utilidades
-  server.on("/reset", HTTP_GET, handleReset);
-  server.on("/test", HTTP_GET, handleTest);
-  server.on("/cancel_timer", HTTP_GET, handleCancelTimer);
-  server.on("/refresh_config", HTTP_GET, handleRefreshConfig);
-  
-  // 404 handler
-  server.onNotFound(handleNotFound);
-  
-  server.begin();
-  Serial.println("✓ Servidor web iniciado en puerto 80");
-}
-
-// =============================================================================
-// MANEJADORES WEB
-// =============================================================================
-
-void handleRoot() {
-  String html = generateWebInterface();
-  server.send(200, "text/html", html);
-  Serial.println("📱 Acceso a interfaz web desde: " + server.client().remoteIP().toString());
-}
-
-void handleOn() {
-  Serial.println("📥 Comando ON recibido por HTTP");
-  setRelayState(true, true);  // true = activar timer
-  httpCommands++;
-  
-  String response = createJsonResponse("on", true);
-  server.send(200, "application/json", response);
-}
-
-void handleOff() {
-  Serial.println("📥 Comando OFF recibido por HTTP");
-  setRelayState(false, false);  // false = no activar timer
-  httpCommands++;
-  
-  // Cancelar temporizador si estaba activo
-  if (autoOffActive) {
-    autoOffActive = false;
-    Serial.println("⏹️ Timer de apagado cancelado");
-  }
-  
-  String response = createJsonResponse("off", false);
-  server.send(200, "application/json", response);
-}
-
-void handleToggle() {
-  bool newState = !relayState;
-  setRelayState(newState, newState);  // activar timer solo si se enciende
-  httpCommands++;
-  String response = createJsonResponse("toggle", relayState);
-  server.send(200, "application/json", response);
-  Serial.println("🔄 Comando TOGGLE - Estado: " + String(relayState ? "ON" : "OFF"));
-}
-
-void handleCancelTimer() {
-  if (autoOffActive) {
-    autoOffActive = false;
-    Serial.println("⏹️ Timer de apagado cancelado manualmente");
-  }
-  String response = createJsonResponse("cancel_timer", relayState);
-  server.send(200, "application/json", response);
-}
-
-void handleRefreshConfig() {
-  Serial.println("🔄 Actualización de configuración solicitada");
-  lastConfigRequest = 0;  // Forzar nueva solicitud
-  requestConfiguration();
-  
-  String response = createJsonResponse("refresh_config", relayState);
-  server.send(200, "application/json", response);
-}
-
-void handleBlinkFast() {
-  executeBlinkPattern(5, 200);
-  String response = createJsonResponse("blink_fast", relayState);
-  server.send(200, "application/json", response);
-  Serial.println("⚡ Comando BLINK FAST");
-}
-
-void handleBlinkSlow() {
-  executeBlinkPattern(3, 1000);
-  String response = createJsonResponse("blink_slow", relayState);
-  server.send(200, "application/json", response);
-  Serial.println("💫 Comando BLINK SLOW");
-}
-
-void handleStatus() {
-  String json = generateStatusJson();
-  server.send(200, "application/json", json);
-}
-
-void handleInfo() {
-  String json = generateInfoJson();
-  server.send(200, "application/json", json);
-}
-
-void handleTest() {
-  Serial.println("🧪 Test ejecutado desde: " + server.client().remoteIP().toString());
-  
-  // Secuencia de test sin timer
-  bool timerWasActive = autoOffActive;
-  autoOffActive = false;
-  
-  for (int i = 0; i < 3; i++) {
-    digitalWrite(RELAY_PIN, RELAY_ON);
-    delay(300);
-    digitalWrite(RELAY_PIN, RELAY_OFF);
-    delay(300);
-  }
-  
-  autoOffActive = timerWasActive;
-  
-  String response = createJsonResponse("test", false);
-  server.send(200, "application/json", response);
-}
-
-void handleReset() {
-  String response = createJsonResponse("reset", false);
-  server.send(200, "application/json", response);
-  Serial.println("🔄 RESET solicitado desde: " + server.client().remoteIP().toString());
-  delay(1000);
-  ESP.restart();
-}
-
-void handleNotFound() {
-  String message = "{\"error\":\"Endpoint no encontrado\",\"module_id\":" + String(MODULE_ID) + "}";
-  server.send(404, "application/json", message);
-  Serial.println("❌ 404 - " + server.uri() + " desde " + server.client().remoteIP().toString());
-}
-
-// =============================================================================
-// CONTROL DEL RELEVADOR
-// =============================================================================
-
-void setRelayState(bool state, bool activateTimer) {
-  // Evitar cambios redundantes
-  if (relayState == state && !activateTimer) {
-    return;
-  }
-  
-  relayState = state;
-  
-  // Control del relevador según la lógica configurada
-  if (state) {
-    digitalWrite(RELAY_PIN, RELAY_ON);
-    digitalWrite(STATUS_LED_PIN, HIGH);
-    Serial.println("💡 Foco ENCENDIDO");
-    Serial.println("   GPIO0 = " + String(RELAY_ON == HIGH ? "HIGH" : "LOW"));
-  } else {
-    digitalWrite(RELAY_PIN, RELAY_OFF);
-    digitalWrite(STATUS_LED_PIN, LOW);
-    Serial.println("💡 Foco APAGADO");
-    Serial.println("   GPIO0 = " + String(RELAY_OFF == HIGH ? "HIGH" : "LOW"));
-  }
-  
-  totalCommands++;
-  
-  // Manejar temporizador de apagado automático
-  if (state && activateTimer) {
-    autoOffActive = true;
-    turnOnTime = millis();
-    Serial.println("⏰ Timer de apagado activado (" + String(AUTO_OFF_DELAY/1000.0) + " segundos)");
-  } else if (!state) {
-    autoOffActive = false;
-  }
-}
-
-void executeBlinkPattern(int cycles, int delayMs) {
-  bool originalState = relayState;
-  bool timerWasActive = autoOffActive;
-  
-  // Desactivar timer temporalmente
-  autoOffActive = false;
-  
-  Serial.println("⚡ Ejecutando " + String(cycles) + " parpadeos (" + String(delayMs) + "ms)");
-  
-  for (int i = 0; i < cycles; i++) {
-    digitalWrite(RELAY_PIN, RELAY_ON);
-    delay(delayMs);
-    digitalWrite(RELAY_PIN, RELAY_OFF);
-    delay(delayMs);
-  }
-  
-  // Restaurar estado original
-  digitalWrite(RELAY_PIN, originalState ? RELAY_ON : RELAY_OFF);
-  relayState = originalState;
-  
-  // Restaurar timer si estaba activo
-  if (timerWasActive && originalState) {
-    autoOffActive = true;
-  }
-  
-  Serial.println("✓ Patrón completado, estado restaurado");
-}
-
-// =============================================================================
-// COMUNICACIÓN CON MAESTRO
-// =============================================================================
-
-void handleRegistration() {
-  if (millis() - lastRegistration < REGISTRATION_RETRY) return;
-  
-  lastRegistration = millis();
-  registerWithMaster();
-}
-
-void registerWithMaster() {
-  if (!wifiConnected) return;
-  
-  Serial.println("📡 Registrando con maestro...");
-  
-  // LED encendido durante registro
-  digitalWrite(STATUS_LED_PIN, HIGH);
-  
-  String url = "http://" + String(masterIP) + ":" + String(masterPort) + "/register?id=" + String(MODULE_ID);
-  url += "&version=5.0";
-  
-  httpClient.begin(wifiClient, url);
-  httpClient.setTimeout(HTTP_TIMEOUT);
-  
-  int httpCode = httpClient.GET();
-  
-  digitalWrite(STATUS_LED_PIN, LOW);
-  
-  if (httpCode == HTTP_CODE_OK) {
-    String payload = httpClient.getString();
-    isRegistered = true;
-    failedCommands = 0;
-    Serial.println("✓ Registro exitoso: " + payload);
-    
-    // Triple parpadeo rápido para confirmar registro
-    for (int i = 0; i < 3; i++) {
-      digitalWrite(STATUS_LED_PIN, HIGH);
-      delay(50);
-      digitalWrite(STATUS_LED_PIN, LOW);
-      delay(50);
-    }
-  } else if (httpCode > 0) {
-    Serial.println("⚠ Error registro - HTTP " + String(httpCode));
-    
-    // Parpadeo lento para indicar error
-    digitalWrite(STATUS_LED_PIN, HIGH);
+  int attempts = 0;
+  while (WiFi.status() != WL_CONNECTED && attempts < 60) {
     delay(500);
-    digitalWrite(STATUS_LED_PIN, LOW);
-    
-    failedCommands++;
-  } else {
-    Serial.println("⚠ Error conexión maestro: " + httpClient.errorToString(httpCode));
-    failedCommands++;
+    Serial.print(".");
+    digitalWrite(LED_PIN, attempts % 2);
+    attempts++;
   }
   
-  httpClient.end();
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.println("\n✓ WiFi conectado!");
+    Serial.println("IP: " + WiFi.localIP().toString());
+    Serial.println("RSSI: " + String(WiFi.RSSI()) + " dBm");
+    digitalWrite(LED_PIN, LOW);
+  } else {
+    Serial.println("\n✗ Error WiFi!");
+    delay(10000);
+    ESP.restart();
+  }
 }
 
-void handleHeartbeat() {
-  if (millis() - lastHeartbeat < HEARTBEAT_INTERVAL) return;
+// =============================================================================
+// REGISTRO
+// =============================================================================
+
+void registerModule() {
+  Serial.println("\n📝 Registrando módulo " + String(MODULE_ID) + "...");
   
-  lastHeartbeat = millis();
-  sendHeartbeat();
+  WiFiClient client;
+  HTTPClient http;
+  
+  String url = "http://" + String(MASTER_IP) + ":" + String(API_PORT) + 
+               "/register?id=" + String(MODULE_ID);
+  
+  http.begin(client, url);
+  http.setTimeout(5000);
+  
+  int httpCode = http.GET();
+  
+  if (httpCode == 200) {
+    registered = true;
+    Serial.println("✓ Registrado!");
+    
+    // Parpadeo confirmación
+    for (int i = 0; i < 3; i++) {
+      digitalWrite(LED_PIN, HIGH);
+      delay(100);
+      digitalWrite(LED_PIN, LOW);
+      delay(100);
+    }
+  } else {
+    Serial.println("✗ Error registro: " + String(httpCode));
+  }
+  
+  http.end();
 }
+
+// =============================================================================
+// HEARTBEAT
+// =============================================================================
 
 void sendHeartbeat() {
-  // Breve parpadeo durante heartbeat
-  digitalWrite(STATUS_LED_PIN, HIGH);
-  delay(20);
-  if (!relayState) digitalWrite(STATUS_LED_PIN, LOW);
+  WiFiClient client;
+  HTTPClient http;
   
-  String url = "http://" + String(masterIP) + ":" + String(masterPort) + "/heartbeat";
-  url += "?id=" + String(MODULE_ID);
-  url += "&state=" + String(relayState ? "1" : "0");
-  url += "&uptime=" + String(millis() - bootTime);
-  url += "&rssi=" + String(WiFi.RSSI());
-  url += "&heap=" + String(ESP.getFreeHeap());
-  url += "&autooff=" + String(autoOffActive ? "1" : "0");
-  url += "&autooffcount=" + String(autoOffCount);
-  url += "&configured_delay=" + String(AUTO_OFF_DELAY);  // Enviar delay configurado
-  url += "&udp_commands=" + String(udpCommands);
-  url += "&http_commands=" + String(httpCommands);
+  String url = "http://" + String(MASTER_IP) + ":" + String(API_PORT) + 
+               "/heartbeat?id=" + String(MODULE_ID) + 
+               "&state=" + String(relayOn ? "1" : "0");
   
-  httpClient.begin(wifiClient, url);
-  httpClient.setTimeout(HTTP_TIMEOUT);
+  http.begin(client, url);
+  http.setTimeout(2000);
   
-  int httpCode = httpClient.GET();
+  int httpCode = http.GET();
   
-  if (httpCode == HTTP_CODE_OK) {
-    heartbeatCount++;
-    failedCommands = 0;
-    Serial.println("💓 Heartbeat #" + String(heartbeatCount) + " enviado (delay=" + String(AUTO_OFF_DELAY) + "ms, UDP:" + String(udpCommands) + ", HTTP:" + String(httpCommands) + ")");
+  if (httpCode == 200) {
+    Serial.println("♥");
   } else {
-    failedCommands++;
-    Serial.println("⚠ Error heartbeat - HTTP " + String(httpCode));
+    Serial.println("✗ Heartbeat error");
+    registered = false;
+  }
+  
+  http.end();
+}
+
+// =============================================================================
+// COMANDOS UDP
+// =============================================================================
+
+void handleUDP() {
+  int packetSize = udp.parsePacket();
+  if (!packetSize) return;
+  
+  char buffer[32];
+  int len = udp.read(buffer, 31);
+  buffer[len] = 0;
+  
+  String cmd = String(buffer);
+  IPAddress senderIP = udp.remoteIP();
+  
+  // Verificar que sea del maestro
+  if (senderIP.toString() == String(MASTER_IP)) {
+    Serial.println("CMD: " + cmd);
     
-    // Re-registro si fallan muchos heartbeats
-    if (failedCommands > 3) {
-      Serial.println("🔄 Demasiados fallos, re-registrando...");
-      
-      // Parpadeo de advertencia
-      for (int i = 0; i < 5; i++) {
-        digitalWrite(STATUS_LED_PIN, HIGH);
-        delay(100);
-        digitalWrite(STATUS_LED_PIN, LOW);
-        delay(100);
-      }
-      
-      isRegistered = false;
-      configReceived = false;  // También obtener config de nuevo
-      failedCommands = 0;
+    if (cmd == "ON") {
+      digitalWrite(RELAY_PIN, HIGH);
+      digitalWrite(LED_PIN, HIGH);
+      relayOn = true;
+      relayOnTime = millis();
+      Serial.println("💡 ON → OFF en " + String(AUTO_OFF_DELAY/1000) + "s");
+    }
+    else if (cmd == "OFF") {
+      digitalWrite(RELAY_PIN, LOW);
+      digitalWrite(LED_PIN, LOW);
+      relayOn = false;
+      Serial.println("💡 OFF");
     }
   }
-  
-  httpClient.end();
 }
 
 // =============================================================================
-// GENERACIÓN DE RESPUESTAS JSON
+// ESTADO
 // =============================================================================
 
-String createJsonResponse(String command, bool state) {
-  String json = "{";
-  json += "\"status\":\"ok\",";
-  json += "\"module_id\":" + String(MODULE_ID) + ",";
-  json += "\"command\":\"" + command + "\",";
-  json += "\"relay_state\":" + String(state ? "true" : "false") + ",";
-  json += "\"auto_off_active\":" + String(autoOffActive ? "true" : "false") + ",";
-  json += "\"auto_off_delay\":" + String(AUTO_OFF_DELAY) + ",";
-  json += "\"config_received\":" + String(configReceived ? "true" : "false") + ",";
-  json += "\"udp_port\":" + String(UDP_PORT) + ",";
-  
-  if (autoOffActive) {
-    unsigned long timeLeft = AUTO_OFF_DELAY - (millis() - turnOnTime);
-    json += "\"auto_off_remaining\":" + String(timeLeft) + ",";
-  }
-  
-  json += "\"timestamp\":" + String(millis()) + "";
-  json += "}";
-  return json;
-}
-
-String generateStatusJson() {
-  String json = "{";
-  json += "\"module_id\":" + String(MODULE_ID) + ",";
-  json += "\"relay_state\":" + String(relayState ? "true" : "false") + ",";
-  json += "\"auto_off_active\":" + String(autoOffActive ? "true" : "false") + ",";
-  json += "\"auto_off_delay\":" + String(AUTO_OFF_DELAY) + ",";
-  json += "\"config_received\":" + String(configReceived ? "true" : "false") + ",";
-  json += "\"udp_port\":" + String(UDP_PORT) + ",";
-  
-  if (autoOffActive) {
-    unsigned long timeLeft = AUTO_OFF_DELAY - (millis() - turnOnTime);
-    json += "\"auto_off_remaining\":" + String(timeLeft) + ",";
-  }
-  
-  json += "\"auto_off_count\":" + String(autoOffCount) + ",";
-  json += "\"wifi_connected\":" + String(wifiConnected ? "true" : "false") + ",";
-  json += "\"registered\":" + String(isRegistered ? "true" : "false") + ",";
-  json += "\"uptime\":" + String(millis() - bootTime) + ",";
-  json += "\"free_heap\":" + String(ESP.getFreeHeap()) + ",";
-  json += "\"rssi\":" + String(WiFi.RSSI()) + ",";
-  json += "\"ip\":\"" + WiFi.localIP().toString() + "\",";
-  json += "\"total_commands\":" + String(totalCommands) + ",";
-  json += "\"udp_commands\":" + String(udpCommands) + ",";
-  json += "\"http_commands\":" + String(httpCommands) + ",";
-  json += "\"failed_commands\":" + String(failedCommands) + ",";
-  json += "\"heartbeats\":" + String(heartbeatCount) + ",";
-  json += "\"reconnects\":" + String(reconnectCount) + ",";
-  json += "\"config_requests\":" + String(configRequestCount) + "";
-  json += "}";
-  return json;
-}
-
-String generateInfoJson() {
-  String json = "{";
-  json += "\"module\":{";
-  json += "\"id\":" + String(MODULE_ID) + ",";
-  json += "\"version\":\"5.0\",";
-  json += "\"features\":[\"auto-off\",\"dynamic-config\",\"udp-commands\",\"gpio0-relay\",\"10w-bulb\"],";
-  json += "\"hardware\":\"ESP8266-01S\"";
-  json += "},";
-  json += "\"network\":{";
-  json += "\"ssid\":\"" + String(ssid) + "\",";
-  json += "\"ip\":\"" + WiFi.localIP().toString() + "\",";
-  json += "\"mac\":\"" + WiFi.macAddress() + "\",";
-  json += "\"rssi\":" + String(WiFi.RSSI()) + ",";
-  json += "\"gateway\":\"" + WiFi.gatewayIP().toString() + "\",";
-  json += "\"udp_port\":" + String(UDP_PORT);
-  json += "},";
-  json += "\"system\":{";
-  json += "\"uptime\":" + String(millis() - bootTime) + ",";
-  json += "\"free_heap\":" + String(ESP.getFreeHeap()) + ",";
-  json += "\"chip_id\":\"" + String(ESP.getChipId(), HEX) + "\",";
-  json += "\"flash_size\":" + String(ESP.getFlashChipSize()) + ",";
-  json += "\"cpu_freq\":" + String(ESP.getCpuFreqMHz()) + ",";
-  json += "\"auto_off_count\":" + String(autoOffCount) + ",";
-  json += "\"relay_pin\":\"GPIO" + String(RELAY_PIN) + "\",";
-  json += "\"configured_delay\":" + String(AUTO_OFF_DELAY) + ",";
-  json += "\"config_source\":\"" + String(configReceived ? "master" : "default") + "\"";
-  json += "},";
-  json += "\"statistics\":{";
-  json += "\"total_commands\":" + String(totalCommands) + ",";
-  json += "\"udp_commands\":" + String(udpCommands) + ",";
-  json += "\"http_commands\":" + String(httpCommands) + ",";
-  json += "\"udp_percentage\":" + String(totalCommands > 0 ? (udpCommands * 100 / totalCommands) : 0);
-  json += "}";
-  json += "}";
-  return json;
-}
-
-// =============================================================================
-// INTERFAZ WEB
-// =============================================================================
-
-String generateWebInterface() {
-  String html = "<!DOCTYPE html><html lang='es'><head>";
-  html += "<meta charset='UTF-8'>";
-  html += "<meta name='viewport' content='width=device-width, initial-scale=1.0'>";
-  html += "<title>Módulo Foco " + String(MODULE_ID) + "</title>";
-  html += "<style>";
-  html += "body{font-family:-apple-system,BlinkMacSystemFont,Arial,sans-serif;margin:0;padding:20px;background:linear-gradient(135deg,#667eea 0%,#764ba2 100%);min-height:100vh;color:#333}";
-  html += ".container{max-width:400px;margin:0 auto;background:rgba(255,255,255,0.95);backdrop-filter:blur(10px);border-radius:20px;padding:30px;box-shadow:0 20px 40px rgba(0,0,0,0.1)}";
-  html += ".header{text-align:center;margin-bottom:30px}";
-  html += ".module-id{font-size:2.5em;font-weight:bold;background:linear-gradient(45deg,#4CAF50,#2196F3);-webkit-background-clip:text;-webkit-text-fill-color:transparent;margin-bottom:10px}";
-  html += ".status{padding:15px;border-radius:15px;margin:20px 0;text-align:center;font-weight:bold;font-size:1.2em;transition:all 0.3s ease}";
-  html += ".status.on{background:linear-gradient(45deg,#4CAF50,#45a049);color:white;box-shadow:0 10px 20px rgba(76,175,80,0.3)}";
-  html += ".status.off{background:linear-gradient(45deg,#f44336,#d32f2f);color:white;box-shadow:0 10px 20px rgba(244,67,54,0.3)}";
-  html += ".timer-info{background:#FFF3E0;padding:15px;border-radius:10px;margin:15px 0;text-align:center;border:2px solid #FF9800;display:none}";
-  html += ".timer-info.active{display:block}";
-  html += ".countdown{font-size:2em;font-weight:bold;color:#FF6F00;margin:10px 0}";
-  html += ".controls{display:grid;grid-template-columns:1fr 1fr;gap:15px;margin:25px 0}";
-  html += ".btn{background:linear-gradient(45deg,#2196F3,#1976D2);color:white;border:none;padding:15px;border-radius:15px;cursor:pointer;font-size:1.1em;font-weight:bold;transition:all 0.3s ease;text-decoration:none;display:block;text-align:center}";
-  html += ".btn:hover{transform:translateY(-2px);box-shadow:0 10px 20px rgba(33,150,243,0.3)}";
-  html += ".btn.success{background:linear-gradient(45deg,#4CAF50,#45a049)}";
-  html += ".btn.danger{background:linear-gradient(45deg,#f44336,#d32f2f)}";
-  html += ".btn.warning{background:linear-gradient(45deg,#FF9800,#F57C00)}";
-  html += ".btn.full{grid-column:1 / -1}";
-  html += ".info{background:rgba(33,150,243,0.1);padding:20px;border-radius:15px;margin:25px 0;border-left:4px solid #2196F3}";
-  html += ".info-item{display:flex;justify-content:space-between;margin:8px 0;padding:5px 0;border-bottom:1px solid rgba(33,150,243,0.2)}";
-  html += ".info-label{font-weight:bold;color:#1976D2}";
-  html += ".footer{text-align:center;margin-top:30px;color:#666;font-size:0.9em}";
-  html += ".pulse{animation:pulse 2s infinite}";
-  html += ".config-status{background:#E8F5E9;padding:10px;border-radius:8px;margin:10px 0;font-size:0.9em}";
-  html += ".config-status.pending{background:#FFF3E0}";
-  html += ".udp-badge{background:#9C27B0;color:white;padding:4px 8px;border-radius:12px;font-size:0.8em;margin-left:5px}";
-  html += "@keyframes pulse{0%{box-shadow:0 0 0 0 rgba(255,152,0,0.7)}70%{box-shadow:0 0 0 10px rgba(255,152,0,0)}100%{box-shadow:0 0 0 0 rgba(255,152,0,0)}}";
-  html += "</style></head><body>";
-  
-  html += "<div class='container'>";
-  
-  // Header
-  html += "<div class='header'>";
-  html += "<div class='module-id'>💡 Foco " + String(MODULE_ID) + "</div>";
-  html += "<div style='color:#666'>Controlador de Foco 10W v5.0<span class='udp-badge'>UDP</span></div>";
-  html += "</div>";
-  
-  // Estado de configuración
-  html += "<div class='config-status" + String(configReceived ? "" : " pending") + "'>";
-  if (configReceived) {
-    html += "✅ Configuración sincronizada con maestro";
-  } else {
-    html += "⏳ Usando configuración por defecto";
-  }
-  html += "</div>";
-  
-  // Estado actual
-  String statusClass = relayState ? "on" : "off";
-  String statusText = relayState ? "🟢 ENCENDIDO" : "🔴 APAGADO";
-  String statusIcon = relayState ? "💡" : "🌙";
-  html += "<div class='status " + statusClass + "'>";
-  html += statusIcon + " " + statusText;
-  html += "</div>";
-  
-  // Información del temporizador
-  html += "<div class='timer-info" + String(autoOffActive ? " active pulse" : "") + "'>";
-  html += "⏰ APAGADO AUTOMÁTICO ACTIVO";
-  html += "<div class='countdown' id='countdown'>" + String(AUTO_OFF_DELAY/1000.0) + " segundos</div>";
-  html += "</div>";
-  
-  // Controles principales
-  html += "<div class='controls'>";
-  html += "<button class='btn success' onclick='sendCommand(\"/on\")'>🔆 Encender</button>";
-  html += "<button class='btn danger' onclick='sendCommand(\"/off\")'>🔅 Apagar</button>";
-  html += "<button class='btn' onclick='sendCommand(\"/toggle\")'>🔄 Toggle</button>";
-  html += "<button class='btn warning' onclick='sendCommand(\"/blink_fast\")'>⚡ Parpadeo</button>";
-  html += "</div>";
-  
-  // Controles adicionales
-  html += "<div class='controls'>";
-  html += "<button class='btn' onclick='sendCommand(\"/test\")'>🧪 Test</button>";
-  html += "<button class='btn' onclick='location.reload()'>🔄 Actualizar</button>";
-  if (autoOffActive) {
-    html += "<button class='btn warning full' onclick='sendCommand(\"/cancel_timer\")'>⏹️ Cancelar Timer</button>";
-  }
-  html += "<button class='btn' onclick='sendCommand(\"/refresh_config\")'>🔄 Actualizar Config</button>";
-  html += "<button class='btn danger' onclick='confirmReset()'>🔄 Reiniciar</button>";
-  html += "</div>";
-  
-  // Información del sistema
-  html += "<div class='info'>";
-  html += "<h3 style='margin-top:0;color:#1976D2'>📊 Información del Sistema</h3>";
-  html += "<div class='info-item'><span class='info-label'>IP:</span><span>" + WiFi.localIP().toString() + "</span></div>";
-  html += "<div class='info-item'><span class='info-label'>RSSI:</span><span>" + String(WiFi.RSSI()) + " dBm</span></div>";
-  html += "<div class='info-item'><span class='info-label'>Uptime:</span><span>" + String((millis() - bootTime)/1000) + " seg</span></div>";
-  html += "<div class='info-item'><span class='info-label'>Registrado:</span><span>" + String(isRegistered ? "✅ Sí" : "❌ No") + "</span></div>";
-  html += "<div class='info-item'><span class='info-label'>Auto-off Config:</span><span>" + String(AUTO_OFF_DELAY/1000.0) + "s " + String(configReceived ? "(maestro)" : "(defecto)") + "</span></div>";
-  html += "<div class='info-item'><span class='info-label'>Comandos Total:</span><span>" + String(totalCommands) + "</span></div>";
-  html += "<div class='info-item'><span class='info-label'>Comandos UDP:</span><span>" + String(udpCommands) + " (" + String(totalCommands > 0 ? (udpCommands * 100 / totalCommands) : 0) + "%)</span></div>";
-  html += "<div class='info-item'><span class='info-label'>Comandos HTTP:</span><span>" + String(httpCommands) + "</span></div>";
-  html += "<div class='info-item'><span class='info-label'>Auto-off:</span><span>" + String(autoOffCount) + " veces</span></div>";
-  html += "<div class='info-item'><span class='info-label'>Heartbeats:</span><span>" + String(heartbeatCount) + "</span></div>";
-  html += "<div class='info-item'><span class='info-label'>RAM Libre:</span><span>" + String(ESP.getFreeHeap()) + " bytes</span></div>";
-  html += "</div>";
-  
-  // Footer
-  html += "<div class='footer'>";
-  html += "Sistema Control de Focos v5.0<br>";
-  html += "ESP8266-01S • Foco " + String(MODULE_ID) + " (10W)<br>";
-  html += "⏰ Auto-off: " + String(AUTO_OFF_DELAY/1000.0) + " segundos" + String(configReceived ? " (configurado)" : " (por defecto)") + "<br>";
-  html += "🚀 UDP: Puerto " + String(UDP_PORT) + " • 📍 Relay: GPIO0";
-  html += "</div>";
-  
-  html += "</div>";
-  
-  // JavaScript
-  html += "<script>";
-  html += "var autoOffActive = " + String(autoOffActive ? "true" : "false") + ";";
-  html += "var turnOnTime = " + String(turnOnTime) + ";";
-  html += "var autoOffDelay = " + String(AUTO_OFF_DELAY) + ";";
-  html += "var currentTime = " + String(millis()) + ";";
-  html += "var serverOffset = currentTime - Date.now();";
-  
-  html += "function updateCountdown() {";
-  html += "  if (autoOffActive) {";
-  html += "    var now = Date.now() + serverOffset;";
-  html += "    var elapsed = now - turnOnTime;";
-  html += "    var remaining = Math.max(0, autoOffDelay - elapsed);";
-  html += "    var seconds = (remaining / 1000).toFixed(1);";
-  html += "    document.getElementById('countdown').textContent = seconds + ' segundos';";
-  html += "    if (remaining <= 0) {";
-  html += "      setTimeout(() => location.reload(), 500);";
-  html += "    }";
-  html += "  }";
-  html += "}";
-  
-  html += "function sendCommand(endpoint){";
-  html += "  const btn = event.target;";
-  html += "  btn.style.opacity = '0.6';";
-  html += "  btn.disabled = true;";
-  html += "  fetch(endpoint)";
-  html += "    .then(response => response.json())";
-  html += "    .then(data => {";
-  html += "      console.log('Respuesta:', data);";
-  html += "      if(endpoint !== '/reset') {";
-  html += "        setTimeout(() => location.reload(), 500);";
-  html += "      }";
-  html += "    })";
-  html += "    .catch(err => {";
-  html += "      console.error('Error:', err);";
-  html += "      alert('Error ejecutando comando');";
-  html += "      btn.style.opacity = '1';";
-  html += "      btn.disabled = false;";
-  html += "    });";
-  html += "}";
-  
-  html += "function confirmReset(){";
-  html += "  if(confirm('¿Reiniciar el módulo " + String(MODULE_ID) + "?')){";
-  html += "    sendCommand('/reset');";
-  html += "    alert('Módulo reiniciando...');";
-  html += "  }";
-  html += "}";
-  
-  html += "if (autoOffActive) {";
-  html += "  setInterval(updateCountdown, 100);";
-  html += "  updateCountdown();";
-  html += "}";
-  
-  html += "setTimeout(() => location.reload(), 10000);"; // Auto-refresh cada 10 segundos
-  html += "</script>";
-  
-  html += "</body></html>";
-  
-  return html;
+void printStatus() {
+  Serial.println("\n--- Estado M" + String(MODULE_ID) + " ---");
+  Serial.println("WiFi: " + String(WiFi.status() == WL_CONNECTED ? "OK" : "NO"));
+  Serial.println("IP: " + WiFi.localIP().toString());
+  Serial.println("Registrado: " + String(registered ? "SI" : "NO"));
+  Serial.println("Relay: " + String(relayOn ? "ON" : "OFF"));
+  Serial.println("RSSI: " + String(WiFi.RSSI()) + " dBm");
+  Serial.println("Heap: " + String(ESP.getFreeHeap()));
+  Serial.println("----------------");
 }

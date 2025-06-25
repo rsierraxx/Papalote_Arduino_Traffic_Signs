@@ -18,8 +18,10 @@
 // =============================================================================
 
 // WiFi
-const char* ssid = "LED_CONTROL_SYSTEM";
-const char* password = "12345678";
+// const char* ssid = "LED_CONTROL_SYSTEM";
+// const char* password = "12345678";
+const char* ssid = "sobredosis";
+const char* password = "2WC456403581";
 const IPAddress local_IP(192, 168, 4, 1);
 const IPAddress gateway(192, 168, 4, 1);
 const IPAddress subnet(255, 255, 255, 0);
