@@ -85,8 +85,8 @@ IPAddress calculateBroadcast() {
   // Opción 1: Broadcast específico según tu red
   // Descomenta la línea que corresponda a tu red:
   
-  return IPAddress(192, 168, 1, 255);    // Para red 192.168.1.x
-  // return IPAddress(192, 168, 0, 255);    // Para red 192.168.0.x
+  // return IPAddress(192, 168, 1, 255);    // Para red 192.168.1.x
+  return IPAddress(192, 168, 0, 255);    // Para red 192.168.0.x
   // return IPAddress(192, 168, 4, 255);    // Para red 192.168.4.x
   // return IPAddress(10, 0, 0, 255);       // Para red 10.0.0.x
   

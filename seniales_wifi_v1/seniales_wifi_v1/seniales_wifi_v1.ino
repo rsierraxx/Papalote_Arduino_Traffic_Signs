@@ -54,7 +54,7 @@ const char* ROUTER_PASS = "2WC456403581";    // CAMBIAR! Contraseña de tu WiFi
 #define LED_AUTO_OFF 3000
 
 // Configuración de grupos (qué módulos controla cada botón)
-const int BUTTON1_MODULES[] = {1, 0};              // Botón 1: Solo módulo 1
+const int BUTTON1_MODULES[] = {1, 4};              // Botón 1: Solo módulo 1
 const int BUTTON2_MODULES[] = {2, 0};              // Botón 2: Solo módulo 2
 const int BUTTON3_MODULES[] = {3, 4, 5, 0};        // Botón 3: Módulos 3, 4, 5
 const int BUTTON4_MODULES[] = {6, 7, 8, 0};        // Grupo 4: Módulos 6, 7, 8
