@@ -54,8 +54,8 @@ const char* ROUTER_PASS = "2WC456403581";    // CAMBIAR! Contraseña de tu WiFi
 #define LED_AUTO_OFF 3000
 
 // Configuración de grupos (qué módulos controla cada botón)
-const int BUTTON1_MODULES[] = {1, 4};              // Botón 1: Solo módulo 1
-const int BUTTON2_MODULES[] = {2, 0};              // Botón 2: Solo módulo 2
+const int BUTTON1_MODULES[] = {1,2,3,4,5,6,0};              // Botón 1: Solo módulo 1
+const int BUTTON2_MODULES[] = {7,8,9,10,11,12,0};              // Botón 2: Solo módulo 2
 const int BUTTON3_MODULES[] = {3, 4, 5, 0};        // Botón 3: Módulos 3, 4, 5
 const int BUTTON4_MODULES[] = {6, 7, 8, 0};        // Grupo 4: Módulos 6, 7, 8
 const int BUTTON5_MODULES[] = {9, 10, 11, 0};      // Grupo 5: Módulos 9, 10, 11
@@ -1035,7 +1035,14 @@ void handleModuleRegistration(WiFiClient& client, String request) {
   }
 }
 
+// =============================================================================
+// CORRECCIÓN PARA handleModuleHeartbeat - Reemplazar la función completa
+// =============================================================================
+
 void handleModuleHeartbeat(WiFiClient& client, String request) {
+  // IMPORTANTE: Capturar la IP del cliente ANTES de procesar
+  IPAddress clientIP = client.remoteIP();
+  
   int pos = request.indexOf("id=") + 3;
   int end = request.indexOf(" ", pos);
   if (end == -1) end = request.indexOf("&", pos);
@@ -1044,14 +1051,18 @@ void handleModuleHeartbeat(WiFiClient& client, String request) {
   int moduleId = request.substring(pos, end).toInt();
   
   if (moduleId >= 1 && moduleId <= MAX_MODULES) {
-    modules[moduleId - 1].lastSeen = millis();
-    modules[moduleId - 1].online = true;
+    int index = moduleId - 1;
+    
+    // CRÍTICO: Actualizar la IP del módulo
+    modules[index].ip = clientIP;  // ← ESTA ES LA LÍNEA QUE FALTA
+    modules[index].lastSeen = millis();
+    modules[index].online = true;
     
     // Extraer estado si está presente
     int statePos = request.indexOf("state=");
     if (statePos != -1) {
       statePos += 6;
-      modules[moduleId - 1].state = (request.charAt(statePos) == '1');
+      modules[index].state = (request.charAt(statePos) == '1');
     }
     
     client.println("HTTP/1.1 200 OK\r\n\r\n{\"status\":\"ok\"}");

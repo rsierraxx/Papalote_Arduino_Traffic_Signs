@@ -29,7 +29,7 @@
 // CONFIGURACIÓN - CAMBIAR ESTOS VALORES
 // =============================================================================
 
-const int MODULE_ID = 4;                          // CAMBIAR! (1-12) ID único para cada módulo
+const int MODULE_ID = 12;                          // CAMBIAR! (1-12) ID único para cada módulo
 
 const char* ROUTER_SSID = "pmn_seniales";       // CAMBIAR! Nombre de tu WiFi
 const char* ROUTER_PASS = "2WC456403581";     // CAMBIAR! Contraseña de tu WiFi
