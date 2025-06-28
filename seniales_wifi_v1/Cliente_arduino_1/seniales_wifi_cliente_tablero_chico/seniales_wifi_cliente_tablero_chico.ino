@@ -1,12 +1,12 @@
 /*
  * Sistema de Control de Focos - Cliente Control Remoto
- * Versión: 4.0 - Ultra simplificado
+ * Versión: 4.0 - Con IP ESTÁTICA y inicio no bloqueante
  * 
  * Características:
- * - Solo envía comandos UDP, sin esperar respuesta
- * - Sin heartbeat ni configuración dinámica
- * - Máxima velocidad y confiabilidad
- * - LEDs simples de confirmación
+ * - IP estática para conexión más rápida y estable
+ * - Funciona inmediatamente aunque no haya WiFi
+ * - Se reconecta automáticamente cuando el router esté listo
+ * - LEDs funcionan siempre para feedback visual
  */
 
 #include "WiFiS3.h"
@@ -16,9 +16,16 @@
 // CONFIGURACIÓN
 // =============================================================================
 
-const char* ssid = "LED_CONTROL_SYSTEM";
-const char* password = "12345678";
-const char* masterIP = "192.168.4.1";
+const char* ssid = "pmn_senviales";
+const char* password = "2WC456403581";
+
+// IP ESTÁTICA DEL CONTROL REMOTO
+IPAddress local_IP(192, 168, 0, 99);      // IP del control remoto
+IPAddress gateway(192, 168, 0, 1);         // Router
+IPAddress subnet(255, 255, 255, 0);
+
+// IP del maestro
+const char* masterIP = "192.168.0.100";
 const int udpPort = 8888;
 
 // Pines
@@ -40,6 +47,7 @@ const int udpPort = 8888;
 #define DEBOUNCE_TIME 50
 #define MIN_PRESS_INTERVAL 3500  // 3.5 segundos entre pulsaciones
 #define LED_ON_TIME 200         // LED encendido 200ms
+#define WIFI_RETRY_INTERVAL 5000 // Reintentar WiFi cada 5 segundos
 
 // Comandos
 const char* CMD_GROUP_1 = "button_group_1";
@@ -55,6 +63,14 @@ const char* CMD_GROUP_6 = "button_group_6";
 
 WiFiUDP udp;
 bool wifiConnected = false;
+bool udpStarted = false;
+unsigned long lastWifiAttempt = 0;
+int wifiAttempts = 0;
+
+// Para mostrar estado WiFi
+unsigned long wifiStatusBlink = 0;
+bool wifiStatusLed = false;
+int wifiIndicatorLed = LED6_PIN;  // Usar LED6 como indicador WiFi
 
 struct Button {
   bool lastState = HIGH;
@@ -66,6 +82,15 @@ struct Button {
 Button buttons[6];
 unsigned long ledOffTime[6] = {0, 0, 0, 0, 0, 0};
 
+// Cola de comandos pendientes (opcional)
+struct PendingCommand {
+  int button;
+  unsigned long timestamp;
+  bool sent;
+};
+PendingCommand pendingCommands[10];
+int pendingCount = 0;
+
 // =============================================================================
 // SETUP
 // =============================================================================
@@ -74,10 +99,62 @@ void setup() {
   Serial.begin(115200);
   delay(1000);
   
-  Serial.println("\n=== CONTROL REMOTO v4.0 ===");
-  Serial.println("Modo: ULTRA SIMPLE");
+  Serial.println(F("\n=== CONTROL REMOTO v4.0 - IP ESTATICA ==="));
+  Serial.print(F("IP Control: "));
+  Serial.println(local_IP);
+  Serial.print(F("IP Maestro: "));
+  Serial.println(masterIP);
   
   // Configurar pines
+  setupHardware();
+  
+  // Inicializar comandos pendientes
+  for (int i = 0; i < 10; i++) {
+    pendingCommands[i].sent = true;
+  }
+  
+  Serial.println(F("Sistema listo (sin WiFi)"));
+  Serial.println(F("Esperando router..."));
+  
+  // Configurar IP estática antes de iniciar WiFi
+  WiFi.config(local_IP, gateway, subnet);
+  
+  // Iniciar conexión WiFi (no bloqueante)
+  WiFi.begin(ssid, password);
+  lastWifiAttempt = millis();
+}
+
+// =============================================================================
+// LOOP
+// =============================================================================
+
+void loop() {
+  // Manejar conexión WiFi (no bloqueante)
+  handleWiFiConnection();
+  
+  // Leer y procesar botones - SIEMPRE funciona
+  handleButtons();
+  
+  // Actualizar LEDs - SIEMPRE funciona
+  updateLeds();
+  
+  // Procesar comandos pendientes si hay WiFi
+  if (wifiConnected && pendingCount > 0) {
+    processPendingCommands();
+  }
+  
+  // Mostrar estado WiFi en LED6
+  updateWiFiIndicator();
+  
+  delay(10);
+}
+
+// =============================================================================
+// FUNCIONES
+// =============================================================================
+
+void setupHardware() {
+  // Configurar botones
   pinMode(BUTTON1_PIN, INPUT_PULLUP);
   pinMode(BUTTON2_PIN, INPUT_PULLUP);
   pinMode(BUTTON3_PIN, INPUT_PULLUP);
@@ -85,6 +162,7 @@ void setup() {
   pinMode(BUTTON5_PIN, INPUT_PULLUP);
   pinMode(BUTTON6_PIN, INPUT_PULLUP);
   
+  // Configurar LEDs
   pinMode(LED1_PIN, OUTPUT);
   pinMode(LED2_PIN, OUTPUT);
   pinMode(LED3_PIN, OUTPUT);
@@ -93,37 +171,77 @@ void setup() {
   pinMode(LED6_PIN, OUTPUT);
   
   // LEDs apagados
-  digitalWrite(LED1_PIN, LOW);
-  digitalWrite(LED2_PIN, LOW);
-  digitalWrite(LED3_PIN, LOW);
-  digitalWrite(LED4_PIN, LOW);
-  digitalWrite(LED5_PIN, LOW);
-  digitalWrite(LED6_PIN, LOW);
-  
-  // Conectar WiFi
-  connectWiFi();
+  for (int i = 0; i < 6; i++) {
+    int ledPin = (i < 3) ? (LED1_PIN + i) : (LED4_PIN + (i - 3));
+    digitalWrite(ledPin, LOW);
+  }
 }
 
-// =============================================================================
-// LOOP
-// =============================================================================
-
-void loop() {
-  // Verificar WiFi
-  if (WiFi.status() != WL_CONNECTED) {
-    if (wifiConnected) {
+void handleWiFiConnection() {
+  // Si ya estamos conectados, verificar que siga así
+  if (wifiConnected) {
+    if (WiFi.status() != WL_CONNECTED) {
+      Serial.println(F("WiFi perdido! Reconectando..."));
       wifiConnected = false;
-      Serial.println("WiFi perdido!");
+      udpStarted = false;
+      udp.stop();
     }
-    // Intentar reconectar cada 5 segundos
-    static unsigned long lastReconnect = 0;
-    if (millis() - lastReconnect > 5000) {
-      lastReconnect = millis();
-      connectWiFi();
-    }
+    return;
   }
   
-  // Leer botones
+  // Si no estamos conectados, intentar cada WIFI_RETRY_INTERVAL
+  if (!wifiConnected && millis() - lastWifiAttempt > WIFI_RETRY_INTERVAL) {
+    lastWifiAttempt = millis();
+    
+    if (WiFi.status() == WL_CONNECTED) {
+      // ¡Conectado!
+      wifiConnected = true;
+      Serial.println(F("\n*** WiFi CONECTADO! ***"));
+      Serial.print(F("IP asignada: "));
+      Serial.println(WiFi.localIP());
+      
+      // Verificar que tenemos la IP correcta
+      if (WiFi.localIP() != local_IP) {
+        Serial.println(F("ADVERTENCIA: IP diferente a la configurada!"));
+      }
+      
+      // Iniciar UDP
+      udp.begin(udpPort);
+      udpStarted = true;
+      Serial.println(F("UDP iniciado"));
+      
+      // Enviar anuncio al maestro
+      udp.beginPacket(masterIP, udpPort);
+      udp.print("REMOTE_CONNECTED:192.168.0.99");
+      udp.endPacket();
+      
+      // Animación de confirmación
+      celebrateConnection();
+      
+    } else {
+      // Aún no conectado
+      wifiAttempts++;
+      
+      // Cada 12 intentos (1 minuto), reintentar WiFi.begin
+      if (wifiAttempts % 12 == 0) {
+        Serial.print(F("."));
+        // Reconfigurar IP estática por si acaso
+        WiFi.config(local_IP, gateway, subnet);
+        WiFi.begin(ssid, password);
+      }
+      
+      // Cada 60 intentos (5 minutos), mostrar mensaje
+      if (wifiAttempts % 60 == 0) {
+        Serial.print(F("\nEsperando router ("));
+        Serial.print(wifiAttempts * 5 / 60);
+        Serial.println(F(" min)"));
+      }
+    }
+  }
+}
+
+void handleButtons() {
+  // Leer todos los botones
   bool states[6] = {
     digitalRead(BUTTON1_PIN),
     digitalRead(BUTTON2_PIN),
@@ -151,14 +269,8 @@ void loop() {
             processButton(i);
             buttons[i].lastPress = millis();
           } else {
-            // Parpadeo rápido = esperar
-            for (int j = 0; j < 3; j++) {
-              int ledPin = (i < 3) ? (LED1_PIN + i) : (LED4_PIN + (i - 3));
-              digitalWrite(ledPin, HIGH);
-              delay(50);
-              digitalWrite(ledPin, LOW);
-              delay(50);
-            }
+            // Mostrar que debe esperar
+            showWaitFeedback(i);
           }
         }
       }
@@ -166,8 +278,83 @@ void loop() {
     
     buttons[i].lastState = states[i];
   }
+}
+
+void processButton(int button) {
+  Serial.print(F("Boton "));
+  Serial.print(button + 1);
   
-  // Apagar LEDs automáticamente
+  // LED siempre se enciende (funciona sin WiFi)
+  int ledPin = (button < 3) ? (LED1_PIN + button) : (LED4_PIN + (button - 3));
+  digitalWrite(ledPin, HIGH);
+  ledOffTime[button] = millis() + LED_ON_TIME;
+  
+  if (wifiConnected) {
+    // Enviar comando inmediatamente
+    const char* command = getCommand(button);
+    
+    udp.beginPacket(masterIP, udpPort);
+    udp.print(command);
+    udp.endPacket();
+    
+    Serial.print(F(" -> "));
+    Serial.println(command);
+  } else {
+    // Guardar comando pendiente
+    if (pendingCount < 10) {
+      pendingCommands[pendingCount].button = button;
+      pendingCommands[pendingCount].timestamp = millis();
+      pendingCommands[pendingCount].sent = false;
+      pendingCount++;
+      
+      Serial.println(F(" (guardado - sin WiFi)"));
+    } else {
+      Serial.println(F(" (sin WiFi - cola llena)"));
+    }
+  }
+}
+
+const char* getCommand(int button) {
+  switch(button) {
+    case 0: return CMD_GROUP_1;
+    case 1: return CMD_GROUP_2;
+    case 2: return CMD_GROUP_3;
+    case 3: return CMD_GROUP_4;
+    case 4: return CMD_GROUP_5;
+    case 5: return CMD_GROUP_6;
+    default: return "";
+  }
+}
+
+void processPendingCommands() {
+  int sent = 0;
+  
+  for (int i = 0; i < 10; i++) {
+    if (!pendingCommands[i].sent) {
+      const char* command = getCommand(pendingCommands[i].button);
+      
+      udp.beginPacket(masterIP, udpPort);
+      udp.print(command);
+      udp.endPacket();
+      
+      pendingCommands[i].sent = true;
+      sent++;
+      
+      Serial.print(F("Enviando pendiente: "));
+      Serial.println(command);
+      
+      delay(50); // Pequeña pausa entre envíos
+    }
+  }
+  
+  if (sent > 0) {
+    pendingCount = 0;
+    Serial.print(F("Comandos pendientes enviados: "));
+    Serial.println(sent);
+  }
+}
+
+void updateLeds() {
   unsigned long now = millis();
   for (int i = 0; i < 6; i++) {
     if (ledOffTime[i] > 0 && now >= ledOffTime[i]) {
@@ -176,88 +363,56 @@ void loop() {
       ledOffTime[i] = 0;
     }
   }
-  
-  delay(10);
 }
 
-// =============================================================================
-// FUNCIONES
-// =============================================================================
-
-void connectWiFi() {
-  Serial.print("Conectando a WiFi");
-  
-  WiFi.begin(ssid, password);
-  
-  int attempts = 0;
-  while (WiFi.status() != WL_CONNECTED && attempts < 20) {
-    delay(500);
-    Serial.print(".");
-    attempts++;
-  }
-  
-  if (WiFi.status() == WL_CONNECTED) {
-    wifiConnected = true;
-    udp.begin(udpPort);
-    
-    Serial.println("\nWiFi conectado!");
-    Serial.println("IP: " + WiFi.localIP().toString());
-    
-    // Confirmación visual
-    for (int i = 0; i < 3; i++) {
-      digitalWrite(LED1_PIN, HIGH);
-      digitalWrite(LED2_PIN, HIGH);
-      digitalWrite(LED3_PIN, HIGH);
-      digitalWrite(LED4_PIN, HIGH);
-      digitalWrite(LED5_PIN, HIGH);
-      digitalWrite(LED6_PIN, HIGH);
-      delay(100);
-      digitalWrite(LED1_PIN, LOW);
-      digitalWrite(LED2_PIN, LOW);
-      digitalWrite(LED3_PIN, LOW);
-      digitalWrite(LED4_PIN, LOW);
-      digitalWrite(LED5_PIN, LOW);
-      digitalWrite(LED6_PIN, LOW);
-      delay(100);
+void updateWiFiIndicator() {
+  if (!wifiConnected) {
+    // Parpadeo lento = esperando WiFi
+    if (millis() - wifiStatusBlink > 1000) {
+      wifiStatusLed = !wifiStatusLed;
+      digitalWrite(wifiIndicatorLed, wifiStatusLed);
+      wifiStatusBlink = millis();
     }
   } else {
-    Serial.println("\nError WiFi!");
+    // WiFi conectado = LED apagado
+    if (digitalRead(wifiIndicatorLed) == HIGH) {
+      digitalWrite(wifiIndicatorLed, LOW);
+    }
   }
 }
 
-void processButton(int button) {
-  Serial.print("Botón " + String(button + 1) + " → ");
+void showWaitFeedback(int button) {
+  // Parpadeo rápido = debe esperar
+  int ledPin = (button < 3) ? (LED1_PIN + button) : (LED4_PIN + (button - 3));
   
-  // Verificar WiFi
-  if (!wifiConnected) {
-    Serial.println("Sin WiFi!");
-    // LED rojo rápido
-    int ledPin = (button < 3) ? (LED1_PIN + button) : (LED4_PIN + (button - 3));
+  for (int j = 0; j < 3; j++) {
     digitalWrite(ledPin, HIGH);
     delay(50);
     digitalWrite(ledPin, LOW);
-    return;
+    delay(50);
   }
   
-  // Encender LED
-  int ledPin = (button < 3) ? (LED1_PIN + button) : (LED4_PIN + (button - 3));
-  digitalWrite(ledPin, HIGH);
-  ledOffTime[button] = millis() + LED_ON_TIME;
-  
-  // Enviar comando
-  const char* command = "";
-  switch(button) {
-    case 0: command = CMD_GROUP_1; break;
-    case 1: command = CMD_GROUP_2; break;
-    case 2: command = CMD_GROUP_3; break;
-    case 3: command = CMD_GROUP_4; break;
-    case 4: command = CMD_GROUP_5; break;
-    case 5: command = CMD_GROUP_6; break;
+  Serial.print(F("Boton "));
+  Serial.print(button + 1);
+  Serial.println(F(" - esperar 3.5s"));
+}
+
+void celebrateConnection() {
+  // Animación de barrido cuando se conecta
+  for (int cycle = 0; cycle < 2; cycle++) {
+    // Barrido hacia adelante
+    for (int i = 0; i < 6; i++) {
+      int ledPin = (i < 3) ? (LED1_PIN + i) : (LED4_PIN + (i - 3));
+      digitalWrite(ledPin, HIGH);
+      delay(50);
+      digitalWrite(ledPin, LOW);
+    }
+    // Barrido hacia atrás
+    for (int i = 5; i >= 0; i--) {
+      int ledPin = (i < 3) ? (LED1_PIN + i) : (LED4_PIN + (i - 3));
+      digitalWrite(ledPin, HIGH);
+      delay(50);
+      digitalWrite(ledPin, LOW);
+    }
   }
-  
-  udp.beginPacket(masterIP, udpPort);
-  udp.print(command);
-  udp.endPacket();
-  
-  Serial.println(command);
 }
