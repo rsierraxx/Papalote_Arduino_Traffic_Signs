@@ -16,7 +16,7 @@
 // CONFIGURACIÓN
 // =============================================================================
 
-const char* ROUTER_SSID = "pmn_seniales";
+const char* ROUTER_SSID = "pmn_senviales";
 const char* ROUTER_PASS = "2WC456403581";
 
 // IP ESTÁTICA DEL MAESTRO - IMPORTANTE!
@@ -53,8 +53,8 @@ const IPAddress MODULE_IPS[12] = {
 #define LED3_PIN 7
 
 // Grupos
-const byte BUTTON1_MODULES[] = {1, 2, 3, 4, 5, 6, 0};
-const byte BUTTON2_MODULES[] = {7, 8, 9, 10, 11, 12, 0};
+const byte BUTTON1_MODULES[] = {1, 2, 3, 4, 5, 6, 7, 0};
+const byte BUTTON2_MODULES[] = {8, 9, 10, 11, 12, 0};
 const byte BUTTON3_MODULES[] = {3, 4, 5, 0};
 const byte BUTTON4_MODULES[] = {6, 7, 8, 0};
 const byte BUTTON5_MODULES[] = {9, 10, 11, 0};
