@@ -52,15 +52,15 @@ const IPAddress MODULE_IPS[12] = {
 #define LED3_PIN 7
 
 // Grupos
-const byte BUTTON1_MODULES[] = {1, 2, 3, 4, 5, 6 ,7, 0}; // Normal Boton 1
-const byte BUTTON2_MODULES[] = {8, 9, 10, 11, 12, 0}; // Normal Boton 2
+// const byte BUTTON1_MODULES[] = {1, 2, 3, 4, 5, 6 ,7, 0}; // Normal Boton 1
+// const byte BUTTON2_MODULES[] = {8, 9, 10, 11, 12, 0}; // Normal Boton 2
 
-// const byte BUTTON1_MODULES[] = {1, 2, 3, 0}; // Normal Boton 1
-// const byte BUTTON2_MODULES[] = {4, 5, 0}; // Normal Boton 2
+const byte BUTTON1_MODULES[] = {1, 2, 3, 0}; // Normal Boton 1
+const byte BUTTON2_MODULES[] = {4, 5, 0}; // Normal Boton 2
 const byte BUTTON3_MODULES[] = {6, 7, 0}; // Normal Boton 3
 const byte BUTTON4_MODULES[] = {10, 0}; // Mini Boton 1
-const byte BUTTON5_MODULES[] = {9, 12, 0}; // Mini Boton 2
-const byte BUTTON6_MODULES[] = {8, 11, 0}; // Mini Boton 3
+const byte BUTTON5_MODULES[] = {9, 11, 0}; // Mini Boton 2
+const byte BUTTON6_MODULES[] = {8, 12, 0}; // Mini Boton 3
 
 // =============================================================================
 // VARIABLES
