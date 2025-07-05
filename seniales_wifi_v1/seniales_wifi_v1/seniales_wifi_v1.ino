@@ -2,11 +2,10 @@
  * Sistema de Control - Arduino Maestro v9.0
  * Para usar con ESP8266 con IPs ESTÁTICAS
  * 
- * VENTAJAS:
- * - Sin servidor HTTP (todo por UDP)
- * - IPs predefinidas de los módulos
- * - Menor consumo de recursos
- * - Más rápido y estable
+ * VERSIÓN CON INICIO NO BLOQUEANTE
+ * - El sistema funciona aunque no haya WiFi
+ * - Se reconecta automáticamente cuando el router esté listo
+ * - Los botones y LEDs funcionan siempre
  */
 
 #include "WiFiS3.h"
@@ -53,12 +52,15 @@ const IPAddress MODULE_IPS[12] = {
 #define LED3_PIN 7
 
 // Grupos
-const byte BUTTON1_MODULES[] = {1, 2, 3, 4, 5, 6, 7, 0};
-const byte BUTTON2_MODULES[] = {8, 9, 10, 11, 12, 0};
-const byte BUTTON3_MODULES[] = {3, 4, 5, 0};
-const byte BUTTON4_MODULES[] = {6, 7, 8, 0};
-const byte BUTTON5_MODULES[] = {9, 10, 11, 0};
-const byte BUTTON6_MODULES[] = {12, 0};
+// const byte BUTTON1_MODULES[] = {1, 2, 3, 4, 5, 6 ,7, 0}; // Normal Boton 1
+// const byte BUTTON2_MODULES[] = {8, 9, 10, 11, 12, 0}; // Normal Boton 2
+
+const byte BUTTON1_MODULES[] = {1, 2, 3, 0}; // Normal Boton 1
+const byte BUTTON2_MODULES[] = {4, 5, 0}; // Normal Boton 2
+const byte BUTTON3_MODULES[] = {6, 7, 0}; // Normal Boton 3
+const byte BUTTON4_MODULES[] = {10, 0}; // Mini Boton 1
+const byte BUTTON5_MODULES[] = {9, 11, 0}; // Mini Boton 2
+const byte BUTTON6_MODULES[] = {8, 12, 0}; // Mini Boton 3
 
 // =============================================================================
 // VARIABLES
@@ -66,6 +68,14 @@ const byte BUTTON6_MODULES[] = {12, 0};
 
 WiFiUDP udp;
 unsigned long bootTime = 0;
+
+// Estados del sistema
+bool wifiConnected = false;
+bool udpStarted = false;
+bool waitingForWifi = true;
+unsigned long wifiCheckTime = 0;
+unsigned long lastWifiAttempt = 0;
+int wifiAttempts = 0;
 
 struct Module {
   bool online;
@@ -81,6 +91,10 @@ struct Button {
 unsigned long ledOffTime[3] = {0, 0, 0};
 unsigned long lastMaintenance = 0;
 
+// Para mostrar estado WiFi en LEDs
+unsigned long wifiLedBlink = 0;
+bool wifiLedState = false;
+
 // =============================================================================
 // SETUP
 // =============================================================================
@@ -90,9 +104,9 @@ void setup() {
   delay(1000);
   
   bootTime = millis();
-  Serial.println(F("\n=== MAESTRO v9.0 - IPs ESTATICAS ===\n"));
+  Serial.println(F("\n=== MAESTRO v9.0 - INICIO NO BLOQUEANTE ===\n"));
   
-  // Hardware
+  // Hardware - SIEMPRE funciona
   setupHardware();
   
   // Inicializar módulos
@@ -102,8 +116,14 @@ void setup() {
     modules[i].lastSeen = 0;
   }
   
-  // Conectar con IP estática
-  connectWiFi();
+  // Indicar que estamos esperando WiFi
+  Serial.println(F("Sistema listo (sin WiFi)"));
+  Serial.println(F("Esperando router..."));
+  
+  // Configurar WiFi pero NO bloquear
+  WiFi.config(local_IP, gateway, subnet);
+  WiFi.begin(ROUTER_SSID, ROUTER_PASS);
+  lastWifiAttempt = millis();
 }
 
 // =============================================================================
@@ -111,29 +131,34 @@ void setup() {
 // =============================================================================
 
 void loop() {
-  // Verificar WiFi
-  if (WiFi.status() != WL_CONNECTED) {
-    Serial.println(F("WiFi perdido!"));
-    delay(5000);
-    NVIC_SystemReset();
-  }
+  // Verificar/Reconectar WiFi (NO BLOQUEANTE)
+  handleWiFiConnection();
   
-  // UDP
-  handleUDP();
-  
-  // Botones
+  // Botones - SIEMPRE funcionan
   handleButtons();
   
-  // LEDs
+  // LEDs - SIEMPRE funcionan
   updateLeds();
   
-  // Mantenimiento
-  if (millis() - lastMaintenance > 10000) {
-    performMaintenance();
-    lastMaintenance = millis();
+  // Si hay WiFi, manejar UDP
+  if (wifiConnected && udpStarted) {
+    handleUDP();
+    
+    // Mantenimiento
+    if (millis() - lastMaintenance > 10000) {
+      performMaintenance();
+      lastMaintenance = millis();
+    }
   }
   
-  // Comandos serie
+  // Mostrar estado WiFi en LED3 (parpadeo si no hay WiFi)
+  if (!wifiConnected && millis() - wifiLedBlink > 500) {
+    wifiLedState = !wifiLedState;
+    digitalWrite(LED3_PIN, wifiLedState);
+    wifiLedBlink = millis();
+  }
+  
+  // Comandos serie - SIEMPRE funcionan
   if (Serial.available()) {
     handleSerialCommand();
   }
@@ -160,37 +185,64 @@ void setupHardware() {
   }
 }
 
-void connectWiFi() {
-  Serial.println(F("Configurando IP estatica..."));
-  Serial.print(F("IP Maestro: "));
-  Serial.println(local_IP);
-  
-  // Configurar IP estática
-  WiFi.config(local_IP, gateway, subnet);
-  
-  Serial.print(F("Conectando WiFi"));
-  WiFi.begin(ROUTER_SSID, ROUTER_PASS);
-  
-  int attempts = 0;
-  while (WiFi.status() != WL_CONNECTED && attempts < 30) {
-    delay(500);
-    Serial.print(F("."));
-    attempts++;
+void handleWiFiConnection() {
+  // Si ya estamos conectados, verificar que siga así
+  if (wifiConnected) {
+    if (WiFi.status() != WL_CONNECTED) {
+      Serial.println(F("WiFi perdido! Reconectando..."));
+      wifiConnected = false;
+      udpStarted = false;
+      waitingForWifi = true;
+      udp.stop();
+      // Marcar todos los módulos como offline
+      for (int i = 0; i < MAX_MODULES; i++) {
+        modules[i].online = false;
+      }
+    }
+    return;
   }
   
-  if (WiFi.status() == WL_CONNECTED) {
-    Serial.println(F("\nWiFi OK"));
-    Serial.print(F("IP real: "));
-    Serial.println(WiFi.localIP());
+  // Si no estamos conectados, intentar conectar cada 5 segundos
+  if (!wifiConnected && millis() - lastWifiAttempt > 5000) {
+    lastWifiAttempt = millis();
     
-    udp.begin(UDP_PORT);
-    Serial.println(F("Sistema listo!\n"));
-    
-    // Ping inicial a todos
-    pingAllModules();
-  } else {
-    Serial.println(F("\nError WiFi"));
-    while(1);
+    if (WiFi.status() == WL_CONNECTED) {
+      // ¡Conectado!
+      wifiConnected = true;
+      waitingForWifi = false;
+      Serial.println(F("\n*** WiFi CONECTADO! ***"));
+      Serial.print(F("IP: "));
+      Serial.println(WiFi.localIP());
+      
+      // Iniciar UDP
+      udp.begin(UDP_PORT);
+      udpStarted = true;
+      Serial.println(F("UDP iniciado"));
+      
+      // Apagar LED3 (indicador WiFi)
+      digitalWrite(LED3_PIN, LOW);
+      
+      // Ping inicial a todos
+      delay(500);
+      pingAllModules();
+      
+    } else {
+      // Aún no conectado
+      wifiAttempts++;
+      
+      // Cada 12 intentos (1 minuto), reintentar begin
+      if (wifiAttempts % 12 == 0) {
+        Serial.print(F("."));
+        WiFi.begin(ROUTER_SSID, ROUTER_PASS);
+      }
+      
+      // Cada 60 intentos (5 minutos), mostrar mensaje
+      if (wifiAttempts % 60 == 0) {
+        Serial.print(F("\nEsperando router ("));
+        Serial.print(wifiAttempts * 5 / 60);
+        Serial.println(F(" min)"));
+      }
+    }
   }
 }
 
@@ -247,6 +299,12 @@ void handleUDP() {
 }
 
 void activateGroup(const byte* moduleList) {
+  if (!wifiConnected) {
+    Serial.println(F("Sin WiFi - comando guardado"));
+    // Aquí podrías guardar el comando para ejecutarlo cuando haya WiFi
+    return;
+  }
+  
   int i = 0;
   int count = 0;
   
@@ -269,6 +327,11 @@ void activateGroup(const byte* moduleList) {
 }
 
 void allModulesOn() {
+  if (!wifiConnected) {
+    Serial.println(F("Sin WiFi"));
+    return;
+  }
+  
   int count = 0;
   for (int i = 0; i < MAX_MODULES; i++) {
     if (modules[i].online) {
@@ -285,6 +348,11 @@ void allModulesOn() {
 }
 
 void allModulesOff() {
+  if (!wifiConnected) {
+    Serial.println(F("Sin WiFi"));
+    return;
+  }
+  
   int count = 0;
   for (int i = 0; i < MAX_MODULES; i++) {
     if (modules[i].online) {
@@ -316,17 +384,26 @@ void handleButtons() {
     
     if (state == LOW && buttons[i].lastState == HIGH) {
       if (millis() - buttons[i].lastPress > 3500) {
+        // LED siempre se enciende (funciona sin WiFi)
         digitalWrite(LED1_PIN + i, HIGH);
         ledOffTime[i] = millis() + 1000;
         
-        const byte* group = nullptr;
-        switch(i) {
-          case 0: group = BUTTON1_MODULES; break;
-          case 1: group = BUTTON2_MODULES; break;
-          case 2: group = BUTTON3_MODULES; break;
+        // Si hay WiFi, enviar comando
+        if (wifiConnected) {
+          const byte* group = nullptr;
+          switch(i) {
+            case 0: group = BUTTON1_MODULES; break;
+            case 1: group = BUTTON2_MODULES; break;
+            case 2: group = BUTTON3_MODULES; break;
+          }
+          
+          if (group) activateGroup(group);
+        } else {
+          Serial.print(F("Boton "));
+          Serial.print(i + 1);
+          Serial.println(F(" (sin WiFi)"));
         }
         
-        if (group) activateGroup(group);
         buttons[i].lastPress = millis();
       }
     }
@@ -384,30 +461,44 @@ void handleSerialCommand() {
     case '6': activateGroup(BUTTON6_MODULES); break;
     case 'a': allModulesOn(); break;
     case 'o': allModulesOff(); break;
-    case 'p': pingAllModules(); break;
+    case 'p': 
+      if (wifiConnected) pingAllModules();
+      else Serial.println(F("Sin WiFi"));
+      break;
     case 's': printStatus(); break;
     case 'h': printHelp(); break;
+    case 'w': 
+      Serial.print(F("WiFi: "));
+      Serial.println(wifiConnected ? F("OK") : F("NO"));
+      break;
   }
 }
 
 void printStatus() {
   Serial.println(F("\n--- ESTADO ---"));
-  for (int i = 0; i < MAX_MODULES; i++) {
-    Serial.print(F("M"));
-    Serial.print(i + 1);
-    Serial.print(F(" ("));
-    Serial.print(MODULE_IPS[i]);
-    Serial.print(F("): "));
-    
-    if (modules[i].online) {
-      Serial.print(modules[i].state ? F("ON") : F("OFF"));
-      Serial.print(F(" ["));
-      Serial.print((millis() - modules[i].lastSeen) / 1000);
-      Serial.print(F("s]"));
-    } else {
-      Serial.print(F("OFFLINE"));
+  Serial.print(F("WiFi: "));
+  Serial.println(wifiConnected ? F("CONECTADO") : F("DESCONECTADO"));
+  
+  if (wifiConnected) {
+    for (int i = 0; i < MAX_MODULES; i++) {
+      Serial.print(F("M"));
+      Serial.print(i + 1);
+      Serial.print(F(" ("));
+      Serial.print(MODULE_IPS[i]);
+      Serial.print(F("): "));
+      
+      if (modules[i].online) {
+        Serial.print(modules[i].state ? F("ON") : F("OFF"));
+        Serial.print(F(" ["));
+        Serial.print((millis() - modules[i].lastSeen) / 1000);
+        Serial.print(F("s]"));
+      } else {
+        Serial.print(F("OFFLINE"));
+      }
+      Serial.println();
     }
-    Serial.println();
+  } else {
+    Serial.println(F("(Esperando conexion)"));
   }
 }
 
@@ -418,5 +509,6 @@ void printHelp() {
   Serial.println(F("o: Todos OFF"));
   Serial.println(F("p: Ping todos"));
   Serial.println(F("s: Estado"));
+  Serial.println(F("w: Estado WiFi"));
   Serial.println(F("h: Ayuda"));
 }

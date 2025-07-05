@@ -1,5 +1,5 @@
 /*
- * Sistema de Control de Focos - Cliente Control Remoto
+ * Sistema de Control de Focos - Cliente Control Remoto - Tablero grande 
  * Versión: 4.0 - Con IP ESTÁTICA y inicio no bloqueante
  * 
  * Características:
@@ -20,7 +20,7 @@ const char* ssid = "pmn_senviales";
 const char* password = "2WC456403581";
 
 // IP ESTÁTICA DEL CONTROL REMOTO
-IPAddress local_IP(192, 168, 0, 99);      // IP del control remoto
+IPAddress local_IP(192, 168, 0, 98);      // IP del control remoto
 IPAddress gateway(192, 168, 0, 1);         // Router
 IPAddress subnet(255, 255, 255, 0);
 
@@ -212,7 +212,7 @@ void handleWiFiConnection() {
       
       // Enviar anuncio al maestro
       udp.beginPacket(masterIP, udpPort);
-      udp.print("REMOTE_CONNECTED:192.168.0.99");
+      udp.print("REMOTE_CONNECTED:192.168.0.98");
       udp.endPacket();
       
       // Animación de confirmación
