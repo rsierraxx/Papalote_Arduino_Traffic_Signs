@@ -381,9 +381,14 @@ void pingAllModules() {
 void handleButtons() {
   for (int i = 0; i < 3; i++) {
     bool state = digitalRead(BUTTON1_PIN + i);
+    // Serial.println("AQUI 1");
     
-    if (state == LOW && buttons[i].lastState == HIGH) {
-      if (millis() - buttons[i].lastPress > 3500) {
+    // if (state == LOW && buttons[i].lastState == HIGH) {
+    if (state == LOW) {
+      Serial.println("AQUI state: ");
+      Serial.println(state);
+
+      // if (millis() - buttons[i].lastPress > 3500) {
         // LED siempre se enciende (funciona sin WiFi)
         digitalWrite(LED1_PIN + i, HIGH);
         ledOffTime[i] = millis() + 1000;
@@ -405,7 +410,10 @@ void handleButtons() {
         }
         
         buttons[i].lastPress = millis();
-      }
+      // }else{
+      //   Serial.println("-- ERROR --");
+
+      // }
     }
     
     buttons[i].lastState = state;
