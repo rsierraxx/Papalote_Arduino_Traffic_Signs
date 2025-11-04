@@ -45,7 +45,8 @@ const int udpPort = 8888;
 
 // Tiempos
 #define DEBOUNCE_TIME 50
-#define MIN_PRESS_INTERVAL 3500  // 3.5 segundos entre pulsaciones
+// #define MIN_PRESS_INTERVAL 3500  // 3.5 segundos entre pulsaciones
+#define MIN_PRESS_INTERVAL 0  // 3.5 segundos entre pulsaciones
 #define LED_ON_TIME 200         // LED encendido 200ms
 #define WIFI_RETRY_INTERVAL 5000 // Reintentar WiFi cada 5 segundos
 
@@ -146,7 +147,8 @@ void loop() {
   // Mostrar estado WiFi en LED6
   updateWiFiIndicator();
   
-  delay(10);
+  // delay(10);
+  delay(5);
 }
 
 // =============================================================================
